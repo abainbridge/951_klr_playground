@@ -11,7 +11,7 @@
 unsigned char g_image[4096];
 
 void my_exit(int i) {
-    FILE *out = fopen("C:/Coding/951/johnbs_dis.bin", "wb");
+    FILE *out = fopen("out.bin", "wb");
     if (!out) {
         printf("Couldn't open output file\n");
         my_exit(1);
@@ -66,7 +66,7 @@ unsigned parse_immediate(char *buf) {
 }
 
 int main() {
-    FILE *in = fopen("C:/Coding/951/johnbs_dis_modified.asm", "r");
+    FILE *in = fopen("Annotated_Stock1987_951KLR.asm", "r");
     if (!in) {
         printf("Couldn't open input file\n");
         my_exit(1);
