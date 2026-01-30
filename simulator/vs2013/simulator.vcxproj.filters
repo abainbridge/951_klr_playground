@@ -1,0 +1,73 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClInclude Include="..\cpu.h" />
+    <ClInclude Include="..\types.h" />
+    <ClInclude Include="..\deadfrog\df_bitmap.h">
+      <Filter>deadfrog</Filter>
+    </ClInclude>
+    <ClInclude Include="..\deadfrog\df_colour.h">
+      <Filter>deadfrog</Filter>
+    </ClInclude>
+    <ClInclude Include="..\deadfrog\df_common.h">
+      <Filter>deadfrog</Filter>
+    </ClInclude>
+    <ClInclude Include="..\deadfrog\df_font.h">
+      <Filter>deadfrog</Filter>
+    </ClInclude>
+    <ClInclude Include="..\deadfrog\df_message_dialog.h">
+      <Filter>deadfrog</Filter>
+    </ClInclude>
+    <ClInclude Include="..\deadfrog\df_time.h">
+      <Filter>deadfrog</Filter>
+    </ClInclude>
+    <ClInclude Include="..\deadfrog\df_window.h">
+      <Filter>deadfrog</Filter>
+    </ClInclude>
+    <ClInclude Include="..\deadfrog\fonts\df_mono.h">
+      <Filter>deadfrog\fonts</Filter>
+    </ClInclude>
+    <ClInclude Include="..\deadfrog\fonts\df_prop.h">
+      <Filter>deadfrog\fonts</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\cpu.c" />
+    <ClCompile Include="..\main.c" />
+    <ClCompile Include="..\deadfrog\df_bitmap.cpp">
+      <Filter>deadfrog</Filter>
+    </ClCompile>
+    <ClCompile Include="..\deadfrog\df_colour.cpp">
+      <Filter>deadfrog</Filter>
+    </ClCompile>
+    <ClCompile Include="..\deadfrog\df_common.cpp">
+      <Filter>deadfrog</Filter>
+    </ClCompile>
+    <ClCompile Include="..\deadfrog\df_font.cpp">
+      <Filter>deadfrog</Filter>
+    </ClCompile>
+    <ClCompile Include="..\deadfrog\df_message_dialog.cpp">
+      <Filter>deadfrog</Filter>
+    </ClCompile>
+    <ClCompile Include="..\deadfrog\df_time.cpp">
+      <Filter>deadfrog</Filter>
+    </ClCompile>
+    <ClCompile Include="..\deadfrog\df_window.cpp">
+      <Filter>deadfrog</Filter>
+    </ClCompile>
+    <ClCompile Include="..\deadfrog\fonts\df_mono.cpp">
+      <Filter>deadfrog\fonts</Filter>
+    </ClCompile>
+    <ClCompile Include="..\deadfrog\fonts\df_prop.cpp">
+      <Filter>deadfrog\fonts</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="deadfrog">
+      <UniqueIdentifier>{ecc6d6d7-84c7-48a1-a466-461f872a5d15}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="deadfrog\fonts">
+      <UniqueIdentifier>{5a673910-1d69-40d8-a463-c5cc55326289}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>
