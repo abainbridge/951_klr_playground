@@ -22,6 +22,7 @@
     <ClInclude Include="..\deadfrog\fonts\df_mono.h" />
     <ClInclude Include="..\deadfrog\fonts\df_prop.h" />
     <ClInclude Include="..\types.h" />
+    <ClInclude Include="..\virtual_car.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\cpu.c" />
@@ -35,6 +36,7 @@
     <ClCompile Include="..\deadfrog\fonts\df_mono.cpp" />
     <ClCompile Include="..\deadfrog\fonts\df_prop.cpp" />
     <ClCompile Include="..\main.c" />
+    <ClCompile Include="..\virtual_car.c" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <ProjectGuid>{B3065432-5C33-458B-8E39-8D21C67E632D}</ProjectGuid>
@@ -81,7 +83,7 @@
       <AdditionalIncludeDirectories>$(ProjectDir)/../deadfrog;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
-      <SubSystem>Console</SubSystem>
+      <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
   </ItemDefinitionGroup>
@@ -97,7 +99,7 @@
       <AdditionalIncludeDirectories>$(ProjectDir)/../deadfrog;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
-      <SubSystem>Console</SubSystem>
+      <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>

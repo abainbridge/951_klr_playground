@@ -30,6 +30,7 @@
     <ClInclude Include="..\deadfrog\fonts\df_prop.h">
       <Filter>deadfrog\fonts</Filter>
     </ClInclude>
+    <ClInclude Include="..\virtual_car.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\cpu.c" />
@@ -61,6 +62,7 @@
     <ClCompile Include="..\deadfrog\fonts\df_prop.cpp">
       <Filter>deadfrog\fonts</Filter>
     </ClCompile>
+    <ClCompile Include="..\virtual_car.c" />
   </ItemGroup>
   <ItemGroup>
     <Filter Include="deadfrog">

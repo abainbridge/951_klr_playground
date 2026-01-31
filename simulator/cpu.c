@@ -36,7 +36,7 @@ void make_psw(void) {
 
 Byte acc;   // Accumulator
 ADDRESS pc; // Program counter
-long clk;   // clock
+long clk;   // Number of cycles taken by the current instruction.
 
 Byte timer_counter; // timer/event-counter register
 Byte reg_pnt;  // pointer to register bank. Is an index into RAM. 0=reg bank 0, 24=reg bank 1
@@ -63,7 +63,7 @@ Byte xirq_en; // external IRQ's enabled
 Byte tirq_en; // Timer IRQ enabled
 Byte irq_ex;  // IRQ executing
 
-int master_count;
+int timer_cycle_accumulator;
 int int_clk;    // counter for length of /INT pulses for JNI
 int master_clk;
 
@@ -77,7 +77,7 @@ void write_p1(Byte d);
 void write_PB(Byte p, Byte val);
 
 
-void init_cpu(void) {
+void cpu_init(void) {
     pc = 0;
     sp = 8;
     reg_bank = 0;
@@ -122,13 +122,10 @@ void tim_IRQ(void) {
 #define DRAW_TEXT(x, y, msg, ...) \
     DrawTextLeft(g_defaultFont, g_colourBlack, g_window->bmp, x, y, msg, ##__VA_ARGS__)
 
-void dump_state(void) {
-    int x = g_defaultFont->maxCharWidth;
-    int y = g_defaultFont->charHeight;
+void cpu_draw_state(int _x, int _y) {
+    int x = _x + g_defaultFont->maxCharWidth;
+    int y = _y + g_defaultFont->charHeight;
     x += DRAW_TEXT(x, y, "PC:%03x  ", pc);
-    x += DRAW_TEXT(x, y, "Acc:%02x  ", acc);
-    x += DRAW_TEXT(x, y, "Carry:%d  ", carry);
-    x += DRAW_TEXT(x, y, "RegBank:%x  ", !!reg_bank);
     x += DRAW_TEXT(x, y, "MasterClk:%d  ", master_clk);
     x += DRAW_TEXT(x, y, "RealTime:%4.1fms  ", master_clk * 4.444e-4);
     x += DRAW_TEXT(x, y, "T:%d  ", timer_counter);
@@ -149,13 +146,13 @@ void dump_state(void) {
     }
 }
 
-void cpu_exec(void) {
+void cpu_exec(unsigned num_cycles) {
     Byte op;
     ADDRESS adr;
     Byte dat;
     int temp;
 
-    for (;;) {
+    for (; num_cycles; num_cycles--) {
 //        getchar();
         clk = 0;
         lastpc = pc;
@@ -1632,9 +1629,9 @@ void cpu_exec(void) {
             tim_IRQ();
 
         if (timer_on) {
-            master_count += clk;
-            if (master_count > 31) {
-                master_count -= 31;
+            timer_cycle_accumulator += clk;
+            if (timer_cycle_accumulator > 31) {
+                timer_cycle_accumulator -= 31;
                 timer_counter++;
                 if (timer_counter == 0) {
                     t_flag = 1;
@@ -1642,13 +1639,5 @@ void cpu_exec(void) {
                 }
             }
         }
-
-        InputPoll(g_window);
-        if (g_window->windowClosed || g_window->input.keys[KEY_ESC])
-            return;
-        BitmapClear(g_window->bmp, g_colourWhite);
-        dump_state();
-        UpdateWin(g_window);
-//        WaitVsync();
     }
 }

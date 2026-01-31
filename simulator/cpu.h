@@ -3,12 +3,16 @@
 #include "types.h"
 
 
-void init_cpu(void);
-void cpu_exec(void);
+enum { CPU_CLOCK_RATE_HZ = 2250000 };
+static double CPU_CLOCK_PERIOD = 1.0 / CPU_CLOCK_RATE_HZ;
+
+
+void cpu_init(void);
+void cpu_draw_state(int x, int y);
+void cpu_exec(unsigned num_cycles);
 
 extern Byte acc;   // Accumulator
 extern ADDRESS pc; // Program counter
-extern long clk;   // clock
 
 extern Byte timer_counter;   // Internal timer
 extern Byte reg_pnt;  // pointer to register bank
@@ -35,7 +39,7 @@ extern Byte xirq_en; // external IRQ's enabled
 extern Byte tirq_en; // Timer IRQ enabled
 extern Byte irq_ex;  // IRQ executing
 
-extern int master_count;
+extern int timer_cycle_accumulator;
 
 extern Byte ram[128];
 extern Byte rom[4096];
