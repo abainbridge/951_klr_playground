@@ -41,8 +41,8 @@ void __stdcall WinMain(void *instance, void *prev_instance, char *cmd_line, int 
 
     while (!g_window->windowClosed && !g_window->input.keys[KEY_ESC]) {
         InputPoll(g_window);
-        vc_advance(0.0016);
-//        cpu_exec(10);
+        vc_advance(0.016);
+//        cpu_exec(0.0016);
         
         BitmapClear(g_window->bmp, g_colourWhite);
         vc_draw_state(0, 0);

@@ -63,12 +63,12 @@ void vc_advance(double advance_period_seconds) {
         car->engine_power = (car->engine_rpm / MAX_ENGINE_RPM) * 
                             car->manifold_pressure * 110.0;
 
-        double turbo_increment = car->engine_power * 25000.0;
+        double turbo_increment = car->engine_power * 5000.0;
         car->turbo_rpm += turbo_increment * step_period;
-        car->turbo_rpm *= 1.0 - (step_period * 12.0);
+        car->turbo_rpm *= 1.0 - (step_period * 4.0);
 
-        car->engine_rpm += car->engine_power * 50 * step_period;
-        car->engine_rpm *= 1.0 - (step_period * 0.3);
+        car->engine_rpm += car->engine_power * 10 * step_period;
+        car->engine_rpm *= 1.0 - (step_period * 0.05);
         if (car->engine_rpm < MIN_ENGINE_RPM) {
             car->engine_rpm = MIN_ENGINE_RPM;
         }
