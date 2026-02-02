@@ -1,4 +1,4 @@
-// MCS-80 Instruction Set Simulator, based on:
+// MCS-80 Instruction Set Simulator, based on the CPU simulator from:
 //
 //   O2EM Free Odyssey2 / Videopac+ Emulator
 //   Created by Daniel Boris <dboris@comcast.net>  (c) 1997, 1998
@@ -51,7 +51,6 @@ Byte xirq_pend; // external IRQ pending
 Byte tirq_pend; // timer IRQ pending
 Byte t_flag;    // Timer flag
 
-ADDRESS lastpc;
 ADDRESS A11; // PC bit 11
 ADDRESS A11ff;
 Byte reg_bank;// Register Bank (part of psw)
@@ -77,7 +76,7 @@ void write_p1(Byte d);
 void write_PB(Byte p, Byte val);
 
 
-void cpu_init(void) {
+void cpu_reset(void) {
     pc = 0;
     sp = 8;
     reg_bank = 0;
@@ -127,7 +126,7 @@ void cpu_draw_state(int _x, int _y) {
     int y = _y + g_defaultFont->charHeight;
     x += DRAW_TEXT(x, y, "PC:%03x  ", pc);
     x += DRAW_TEXT(x, y, "MasterClk:%d  ", master_clk);
-    x += DRAW_TEXT(x, y, "RealTime:%4.1fms  ", master_clk * 4.444e-4);
+    x += DRAW_TEXT(x, y, "RealTime:%4.1fms  ", master_clk * CPU_CLOCK_PERIOD);
     x += DRAW_TEXT(x, y, "T:%d  ", timer_counter);
 
     x = g_defaultFont->maxCharWidth;
@@ -155,7 +154,6 @@ void cpu_exec(unsigned num_cycles) {
     for (; num_cycles; num_cycles--) {
 //        getchar();
         clk = 0;
-        lastpc = pc;
         if (pc == 0x489)
             pc = pc;
         op = ROM(pc++);

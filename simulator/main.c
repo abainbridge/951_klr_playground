@@ -4,6 +4,7 @@
 
 // Deadfrog headers
 #include "df_font.h"
+#include "df_time.h"
 #include "df_window.h"
 #include "fonts/df_mono.h"
 
@@ -11,19 +12,13 @@
 #include <stdio.h>
 
 
-Byte read_PB(Byte p) {
-    return 0;
-}
-
-Byte read_t1(void) {
-    return 0;
-}
-
-void write_p1(Byte d) {
-}
-
-void write_PB(Byte p, Byte val) {
-}
+// Signals to graph are:
+// 1. ->KLR Reset
+// 2. ->KLR Ignition
+// 3. KLR-> Ignition
+// 4. KLR-> Cycling valve PWM
+// 5. KLR-> Full load signal
+// 6. 
 
 //int main() {
 void __stdcall WinMain(void *instance, void *prev_instance, char *cmd_line, int show_cmd) {
@@ -33,18 +28,37 @@ void __stdcall WinMain(void *instance, void *prev_instance, char *cmd_line, int 
     g_defaultFont = LoadFontFromMemory(df_mono_7x13, sizeof(df_mono_7x13));
 
     vc_init();
-    cpu_init();
+    cpu_reset();
 
     FILE *rom_file = fopen("C:/Coding/951_klr_playground/out.bin", "rb");
     if (!rom_file) return;
     fread(rom, 1, sizeof(rom), rom_file);
 
+    double prev_now = GetRealTime();
+    double sim_speed = 0.0001;
     while (!g_window->windowClosed && !g_window->input.keys[KEY_ESC]) {
         InputPoll(g_window);
-        vc_advance(0.016);
-//        cpu_exec(0.0016);
+        for (int i = 0; i < g_window->input.numKeysTyped; i++) {
+            if (g_window->input.keysTyped[i] == '=') {
+                sim_speed *= 2.0;
+            }
+            if (g_window->input.keysTyped[i] == '-') {
+                sim_speed /= 2.0;
+            }
+        }
+
+        double now = GetRealTime();
+        double advance_time = (now - prev_now) * sim_speed;
+        prev_now = now;
+        if (advance_time > 0.03)
+            advance_time = 0.03;
+        advance_time += sim_speed;
+
+        vc_advance(advance_time);
         
         BitmapClear(g_window->bmp, g_colourWhite);
+        DrawTextRight(g_defaultFont, g_colourBlack, g_window->bmp,
+            g_window->bmp->width, g_defaultFont->charHeight, "Sim Speed: %.5f ", sim_speed);
         vc_draw_state(0, 0);
         cpu_draw_state(0, 100);
 

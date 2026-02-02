@@ -7,7 +7,7 @@ enum { CPU_CLOCK_RATE_HZ = 2250000 };
 static double CPU_CLOCK_PERIOD = 1.0 / CPU_CLOCK_RATE_HZ;
 
 
-void cpu_init(void);
+void cpu_reset(void);
 void cpu_draw_state(int x, int y);
 void cpu_exec(unsigned num_cycles);
 
@@ -27,10 +27,9 @@ extern Byte xirq_pend; // external IRQ pending
 extern Byte tirq_pend; // timer IRQ pending
 extern Byte t_flag;    // Timer flag
 
-extern ADDRESS lastpc;
-extern ADDRESS A11; // PC bit 11
+extern ADDRESS A11;  // PC bit 11
 extern ADDRESS A11ff;
-extern Byte reg_bank;      // Register Bank (part of psw)
+extern Byte reg_bank;// Register Bank (part of psw)
 extern Byte f0;      // Flag Bit (part of psw)
 extern Byte f1;      // Flag Bit 1
 extern Byte ac;      // Aux Carry (part of psw)
