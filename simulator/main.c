@@ -34,7 +34,9 @@ void __stdcall WinMain(void *instance, void *prev_instance, char *cmd_line, int 
     vc_init();
     cpu_reset();
 
-    FILE *rom_file = fopen("C:/Coding/951_klr_playground/out.bin", "rb");
+    FILE *rom_file = fopen("rom.bin", "rb");
+    if (!rom_file) 
+        rom_file = fopen("C:/Coding/951_klr_playground/rom.bin", "rb");
     if (!rom_file) return;
     fread(rom, 1, sizeof(rom), rom_file);
 
