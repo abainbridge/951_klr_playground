@@ -10,8 +10,8 @@
 #include "df_window.h"
 #include <stdio.h>
 
-void push(d) {
-    ram[sp++] = (d);
+void push(Byte d) {
+    ram[sp++] = d;
     if (sp > 23) {
         sp = 8;
     }
@@ -126,7 +126,7 @@ void cpu_draw_state(int _x, int _y) {
     int y = _y + g_defaultFont->charHeight;
     x += DRAW_TEXT(x, y, "PC:%03x  ", pc);
     x += DRAW_TEXT(x, y, "MasterClk:%d  ", master_clk);
-    x += DRAW_TEXT(x, y, "RealTime:%4.1fms  ", master_clk * CPU_CLOCK_PERIOD);
+    x += DRAW_TEXT(x, y, "RealTime:%4.1fms  ", master_clk * CPU_CLOCK_PERIOD * 1e3);
     x += DRAW_TEXT(x, y, "T:%d  ", timer_counter);
 
     x = g_defaultFont->maxCharWidth;
