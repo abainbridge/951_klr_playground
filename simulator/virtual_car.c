@@ -30,8 +30,24 @@ Byte read_t1(void) {
     return g_t1;
 }
 
+static Byte get_graph_val_from_bit_n(Byte val, int n) {
+    val >>= n;
+    return (val & 1) * 255;
+}
+
 void write_p1(Byte d) {
-    d = d;
+    Byte changes = p1 ^ d;
+    if (changes & 0x10) {
+        // Cycling valve changed
+        graph_add_point(FROM_KLR_CYCLING_VALVE_PWM, master_clk, get_graph_val_from_bit_n(p1, 4));
+        graph_add_point(FROM_KLR_CYCLING_VALVE_PWM, master_clk, get_graph_val_from_bit_n(d, 4));
+    }
+    if (changes & 0x20) {
+        // Full load signal changed
+        graph_add_point(FROM_KLR_FULL_LOAD_SIGNAL, master_clk, get_graph_val_from_bit_n(p1, 5));
+        graph_add_point(FROM_KLR_FULL_LOAD_SIGNAL, master_clk, get_graph_val_from_bit_n(d, 5));
+    }
+    p1 = d;
 }
 
 void write_PB(Byte p, Byte val) {

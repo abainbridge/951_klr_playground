@@ -80,7 +80,8 @@ void cpu_reset(void) {
     pc = 0;
     sp = 8;
     reg_bank = 0;
-    p1 = p2 = 0xFF;
+    write_p1(0xff);
+    p2 = 0xFF;
     ac = carry = f0 = 0;
     A11 = A11ff = 0;
     timer_on = 0;

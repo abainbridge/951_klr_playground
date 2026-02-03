@@ -23,6 +23,47 @@ static void show_help_dialog(void) {
         MsgDlgTypeOk);
 }
 
+static int draw_signals_from_dme(int y) {
+    int x = g_defaultFont->maxCharWidth;
+    int w = g_window->bmp->width * 0.8;
+    int h = g_defaultFont->charHeight * 2;
+    int text_y_offset = g_defaultFont->charHeight * 0.6;
+    double time_range_to_display = CPU_CLOCK_RATE_HZ * 50e-3;
+    DrawTextLeft(g_defaultFont, g_colourBlack, g_window->bmp, x, y, "Signals from DME to KLR");
+    DrawTextLeft(g_defaultFont, g_colourBlack, g_window->bmp, x + 1, y, "Signals from DME to KLR");
+    x = g_window->bmp->width * 0.15;
+    y += g_defaultFont->charHeight * 1.2;
+    int text_x = x - g_defaultFont->maxCharWidth;
+    DrawTextRight(g_defaultFont, g_colourBlack, g_window->bmp, text_x, y + text_y_offset, "Reset");
+    graph_draw(TO_KLR_RESET, master_clk, time_range_to_display, x, y, w, h);
+    y += h + 10;
+    DrawTextRight(g_defaultFont, g_colourBlack, g_window->bmp, text_x, y + text_y_offset, "Ignition");
+    graph_draw(TO_KLR_IGNTION, master_clk, time_range_to_display, x, y, w, h);
+    y += h + g_defaultFont->charHeight;
+    HLine(g_window->bmp, 0, y, g_window->bmp->width, g_colourBlack);
+    return y;
+}
+
+static int draw_signals_from_klr(int y) {
+    int x = g_defaultFont->maxCharWidth;
+    int w = g_window->bmp->width * 0.8;
+    int h = g_defaultFont->charHeight * 2;
+    int text_y_offset = g_defaultFont->charHeight * 0.6;
+    double time_range_to_display = CPU_CLOCK_RATE_HZ * 0.5;
+    DrawTextLeft(g_defaultFont, g_colourBlack, g_window->bmp, x, y, "Signals from KLR to DME");
+    DrawTextLeft(g_defaultFont, g_colourBlack, g_window->bmp, x + 1, y, "Signals from KLR to DME");
+    x = g_window->bmp->width * 0.15;
+    y += g_defaultFont->charHeight * 1.2;
+    int text_x = x - g_defaultFont->maxCharWidth;
+    DrawTextRight(g_defaultFont, g_colourBlack, g_window->bmp, text_x, y + text_y_offset, "Cyc valve");
+    graph_draw(FROM_KLR_CYCLING_VALVE_PWM, master_clk, time_range_to_display, x, y, w, h);
+    y += h + 10;
+    DrawTextRight(g_defaultFont, g_colourBlack, g_window->bmp, text_x, y + text_y_offset, "Full load");
+    graph_draw(FROM_KLR_FULL_LOAD_SIGNAL, master_clk, time_range_to_display, x, y, w, h);
+    y += h + g_defaultFont->charHeight;
+    HLine(g_window->bmp, 0, y, g_window->bmp->width, g_colourBlack);
+    return y;
+}
 
 //int main() {
 void __stdcall WinMain(void *instance, void *prev_instance, char *cmd_line, int show_cmd) {
@@ -75,23 +116,8 @@ void __stdcall WinMain(void *instance, void *prev_instance, char *cmd_line, int 
         cpu_draw_state(0, y);
         y += g_defaultFont->charHeight * 15.0;
 
-        {
-            int x = g_defaultFont->maxCharWidth;
-            int w = g_window->bmp->width * 0.8;
-            int h = g_defaultFont->charHeight * 2;
-            int text_y_offset = g_defaultFont->charHeight * 0.6;
-            double time_range_to_display = CPU_CLOCK_RATE_HZ * 50e-3;
-            DrawTextLeft(g_defaultFont, g_colourBlack, g_window->bmp, x, y, "Signals from DME to KLR");
-            DrawTextLeft(g_defaultFont, g_colourBlack, g_window->bmp, x + 1, y, "Signals from DME to KLR");
-            x = g_window->bmp->width * 0.15;
-            y += g_defaultFont->charHeight * 1.2;
-            int text_x = x - g_defaultFont->maxCharWidth;
-            DrawTextRight(g_defaultFont, g_colourBlack, g_window->bmp, text_x, y + text_y_offset, "Reset");
-            graph_draw(TO_KLR_RESET, master_clk, time_range_to_display, x, y, w, h);
-            y += h + 10;
-            DrawTextRight(g_defaultFont, g_colourBlack, g_window->bmp, text_x, y + text_y_offset, "Ignition");
-            graph_draw(TO_KLR_IGNTION, master_clk, time_range_to_display, x, y, w, h);
-        }
+        y = draw_signals_from_dme(y) + g_defaultFont->charHeight;
+        y = draw_signals_from_klr(y);
 
         DrawTextCentre(g_defaultFont, g_colourBlack,
             g_window->bmp, g_window->bmp->width / 2, g_window->bmp->height - g_defaultFont->charHeight,
