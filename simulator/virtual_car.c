@@ -3,6 +3,7 @@
 
 // This project's headers
 #include "cpu.h"
+#include "graph.h"
 
 // Deadfrog headers
 #include "df_font.h"
@@ -58,7 +59,8 @@ void vc_draw_state(int _x, int _y) {
     x += DRAW_TEXT(x, y, "Engine RPM:%.0f  ", g_virtual_car.engine_rpm);
     x += DRAW_TEXT(x, y, "Throttle Pos:%d%%  ", (int)(g_virtual_car.throttle_pos*100.0));
     x += DRAW_TEXT(x, y, "Turbo KRPM:%.0f  ", g_virtual_car.turbo_rpm / 1e3);
-    
+    x += DRAW_TEXT(x, y, "Crank angle:%.2f  ", g_virtual_car.crank_angle);
+
     x = _x + g_defaultFont->maxCharWidth;
     y += g_defaultFont->charHeight * 1.2;
     x += DRAW_TEXT(x, y, "Manifold pressure:%.2f bar  ", g_virtual_car.manifold_pressure);
@@ -67,15 +69,23 @@ void vc_draw_state(int _x, int _y) {
 
 void signal_reset() {
     cpu_reset();
+    graph_add_point(TO_KLR_RESET, master_clk, 0);
+    graph_add_point(TO_KLR_RESET, master_clk, 255);
+    graph_add_point(TO_KLR_RESET, master_clk + 1, 255);
+    graph_add_point(TO_KLR_RESET, master_clk + 1, 0);
 }
 
 void signal_dwell_start() {
     g_t1 = 1;
+    graph_add_point(TO_KLR_IGNTION, master_clk, 0);
+    graph_add_point(TO_KLR_IGNTION, master_clk, 255);
 }
 
 void signal_dwell_end() {
     g_t1 = 0;
     xirq_pend = 1;
+    graph_add_point(TO_KLR_IGNTION, master_clk, 255);
+    graph_add_point(TO_KLR_IGNTION, master_clk, 0);
 }
 
 void vc_advance(double advance_period_seconds) {

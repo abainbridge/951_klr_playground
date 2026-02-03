@@ -21,6 +21,7 @@
     <ClInclude Include="..\deadfrog\df_window.h" />
     <ClInclude Include="..\deadfrog\fonts\df_mono.h" />
     <ClInclude Include="..\deadfrog\fonts\df_prop.h" />
+    <ClInclude Include="..\graph.h" />
     <ClInclude Include="..\types.h" />
     <ClInclude Include="..\virtual_car.h" />
   </ItemGroup>
@@ -35,6 +36,7 @@
     <ClCompile Include="..\deadfrog\df_window.cpp" />
     <ClCompile Include="..\deadfrog\fonts\df_mono.cpp" />
     <ClCompile Include="..\deadfrog\fonts\df_prop.cpp" />
+    <ClCompile Include="..\graph.c" />
     <ClCompile Include="..\main.c" />
     <ClCompile Include="..\virtual_car.c" />
   </ItemGroup>
@@ -81,6 +83,8 @@
       <Optimization>Disabled</Optimization>
       <PreprocessorDefinitions>WIN32;_DEBUG;_CONSOLE;_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>$(ProjectDir)/../deadfrog;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <ExceptionHandling>false</ExceptionHandling>
+      <CompileAs>CompileAsCpp</CompileAs>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -97,6 +101,8 @@
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <PreprocessorDefinitions>WIN32;NDEBUG;_CONSOLE;_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>$(ProjectDir)/../deadfrog;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <ExceptionHandling>false</ExceptionHandling>
+      <CompileAs>CompileAsCpp</CompileAs>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>

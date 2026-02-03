@@ -1,5 +1,6 @@
 // This project's headers
 #include "cpu.h"
+#include "graph.h"
 #include "virtual_car.h"
 
 // Deadfrog headers
@@ -12,19 +13,11 @@
 #include <stdio.h>
 
 
-// Signals to graph are:
-// 1. ->KLR Reset
-// 2. ->KLR Ignition
-// 3. KLR-> Ignition
-// 4. KLR-> Cycling valve PWM
-// 5. KLR-> Full load signal
-// 6. 
-
 //int main() {
 void __stdcall WinMain(void *instance, void *prev_instance, char *cmd_line, int show_cmd) {
     int desk_width, desk_height;
     GetDesktopRes(&desk_width, &desk_height);
-    g_window = CreateWin(desk_width / 4, desk_height / 4, WT_WINDOWED_FIXED, "951 KLR Simulator");
+    g_window = CreateWin(desk_width / 4, desk_height / 3, WT_WINDOWED_FIXED, "951 KLR Simulator");
     g_defaultFont = LoadFontFromMemory(df_mono_7x13, sizeof(df_mono_7x13));
 
     vc_init();
@@ -58,9 +51,19 @@ void __stdcall WinMain(void *instance, void *prev_instance, char *cmd_line, int 
         
         BitmapClear(g_window->bmp, g_colourWhite);
         DrawTextRight(g_defaultFont, g_colourBlack, g_window->bmp,
-            g_window->bmp->width, g_defaultFont->charHeight, "Sim Speed: %.5f ", sim_speed);
+            g_window->bmp->width, g_defaultFont->charHeight, "Sim Speed:%.6f ", sim_speed);
         vc_draw_state(0, 0);
-        cpu_draw_state(0, 100);
+        cpu_draw_state(0, 60);
+
+        {
+            int x = g_window->bmp->width * 0.1;
+            int y = 250;
+            int w = g_window->bmp->width * 0.8;
+            int h = 40;
+            graph_draw(TO_KLR_RESET, master_clk, CPU_CLOCK_RATE_HZ * 50e-3, x, y, w, h);
+            y += h + 10;
+            graph_draw(TO_KLR_IGNTION, master_clk, CPU_CLOCK_RATE_HZ * 50e-3, x, y, w, h);
+        }
 
         UpdateWin(g_window);
         WaitVsync();

@@ -39,6 +39,7 @@ extern Byte tirq_en; // Timer IRQ enabled
 extern Byte irq_ex;  // IRQ executing
 
 extern int timer_cycle_accumulator;
+extern int master_clk;
 
 extern Byte ram[128];
 extern Byte rom[4096];
