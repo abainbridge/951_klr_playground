@@ -50,13 +50,21 @@ void graph_draw(graph_id_t id, unsigned time_now, unsigned time_range_to_display
     DfColour gray = Colour(220, 220, 220, 255);
     RectFill(g_window->bmp, x, y, w, h, gray);
 
+    if (g->first_idx == g->last_idx)
+        return; // No data to plot
+
     double start_time = (double)time_now - (double)time_range_to_display;
     double scale_x = (double)w / (double)time_range_to_display;
     double scale_y = -(double)(h - 1) / 255.0;
     y += h - 1;
 
-    double x2 = x + w;
-    double y2 = y;
+    double x2;
+    double y2;
+    if (g->points[g->last_idx].time < start_time) {
+        HLine(g_window->bmp, x, y + g->points[g->last_idx].val * scale_y, w, g_colourBlack);
+        return;
+    }
+
     for (int i = g->first_idx; i != g->last_idx; i = (i + 1) % MAX_POINTS) {
         graph_point_t *p1 = &g->points[i];
         graph_point_t *p2 = &g->points[(i + 1) % MAX_POINTS];
