@@ -5,12 +5,23 @@
 
 // Deadfrog headers
 #include "df_font.h"
+#include "df_message_dialog.h"
 #include "df_time.h"
 #include "df_window.h"
 #include "fonts/df_mono.h"
 
 // Standard headers
 #include <stdio.h>
+
+
+static void show_help_dialog(void) {
+    MessageDialog("951 KLR Simulator Help",
+        "Keyboard shortcuts:\n\n"
+        "  Esc - Quit\n"
+        "  -/+ keys (next to backspace) - Slow down/speed up the simulation\n"
+        "  1-9 - Set throttle position. 1=idle 9=wide open",
+        MsgDlgTypeOk);
+}
 
 
 //int main() {
@@ -39,6 +50,8 @@ void __stdcall WinMain(void *instance, void *prev_instance, char *cmd_line, int 
                 sim_speed /= 2.0;
             }
         }
+        if (g_window->input.keyDowns[KEY_H])
+            show_help_dialog();
 
         double now = GetRealTime();
         double advance_time = now - prev_now;
@@ -51,29 +64,36 @@ void __stdcall WinMain(void *instance, void *prev_instance, char *cmd_line, int 
         
         BitmapClear(g_window->bmp, g_colourWhite);
         DrawTextRight(g_defaultFont, g_colourBlack, g_window->bmp,
-            g_window->bmp->width, g_defaultFont->charHeight, "Sim Speed:%.5f ", sim_speed);
+            g_window->bmp->width, g_defaultFont->charHeight * 1.65, "Sim Speed:%.5f ", sim_speed);
 
         int y = 0;
         vc_draw_state(0, y);
         y += g_defaultFont->charHeight * 4.5;
 
         cpu_draw_state(0, y);
-        y += g_defaultFont->charHeight * 14.5;
+        y += g_defaultFont->charHeight * 15.0;
 
         {
-            int x = g_window->bmp->width * 0.15;
+            int x = g_defaultFont->maxCharWidth;
             int w = g_window->bmp->width * 0.8;
-            int h = g_defaultFont->charHeight * 3;
-            int text_x = x - g_defaultFont->maxCharWidth;
-            int text_y_offset = g_defaultFont->charHeight * 1.1;
+            int h = g_defaultFont->charHeight * 2;
+            int text_y_offset = g_defaultFont->charHeight * 0.6;
             double time_range_to_display = CPU_CLOCK_RATE_HZ * 50e-3;
-            double x_tick_mark_spacing = CPU_CLOCK_RATE_HZ * 20e-3;
+            DrawTextLeft(g_defaultFont, g_colourBlack, g_window->bmp, x, y, "Signals from DME to KLR");
+            DrawTextLeft(g_defaultFont, g_colourBlack, g_window->bmp, x + 1, y, "Signals from DME to KLR");
+            x = g_window->bmp->width * 0.15;
+            y += g_defaultFont->charHeight * 1.2;
+            int text_x = x - g_defaultFont->maxCharWidth;
             DrawTextRight(g_defaultFont, g_colourBlack, g_window->bmp, text_x, y + text_y_offset, "Reset");
             graph_draw(TO_KLR_RESET, master_clk, time_range_to_display, x, y, w, h);
             y += h + 10;
             DrawTextRight(g_defaultFont, g_colourBlack, g_window->bmp, text_x, y + text_y_offset, "Ignition");
             graph_draw(TO_KLR_IGNTION, master_clk, time_range_to_display, x, y, w, h);
         }
+
+        DrawTextCentre(g_defaultFont, g_colourBlack,
+            g_window->bmp, g_window->bmp->width / 2, g_window->bmp->height - g_defaultFont->charHeight,
+            "For help press 'h'");
 
         UpdateWin(g_window);
         WaitVsync();

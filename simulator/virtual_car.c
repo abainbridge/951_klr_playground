@@ -55,16 +55,22 @@ void vc_init() {
 
 void vc_draw_state(int _x, int _y) {
     int x = _x + g_defaultFont->maxCharWidth;
-    int y = _y + g_defaultFont->charHeight;
+    int y = _y + g_defaultFont->charHeight / 2;
+    DRAW_TEXT(x, y, "Virtual Car Simulation Parameters");
+    DRAW_TEXT(x+1, y, "Virtual Car Simulation Parameters");
+    x += g_defaultFont->maxCharWidth;
+    y += g_defaultFont->charHeight * 1.2;
     x += DRAW_TEXT(x, y, "Engine RPM:%.0f  ", g_virtual_car.engine_rpm);
     x += DRAW_TEXT(x, y, "Throttle Pos:%d%%  ", (int)(g_virtual_car.throttle_pos*100.0));
     x += DRAW_TEXT(x, y, "Turbo KRPM:%.0f  ", g_virtual_car.turbo_rpm / 1e3);
     x += DRAW_TEXT(x, y, "Crank angle:%.2f  ", g_virtual_car.crank_angle);
 
-    x = _x + g_defaultFont->maxCharWidth;
+    x = _x + g_defaultFont->maxCharWidth * 2;
     y += g_defaultFont->charHeight * 1.2;
     x += DRAW_TEXT(x, y, "Manifold pressure:%.2f bar  ", g_virtual_car.manifold_pressure);
     x += DRAW_TEXT(x, y, "Engine power:%.0f BHP ", g_virtual_car.engine_power);
+    y += g_defaultFont->charHeight * 1.7;
+    HLine(g_window->bmp, 0, y, g_window->bmp->width, g_colourBlack);
 }
 
 void signal_reset() {

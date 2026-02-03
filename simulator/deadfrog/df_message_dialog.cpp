@@ -145,7 +145,7 @@ int MessageDialogEx(char const *title, char const *message, MessageDialogType ty
             DrawTextSimpleLen(font, g_colourBlack, win->bmp, x, y, lineStart, lineEnd - lineStart);
             if (*lineEnd == '\0') break;
             lineStart = lineEnd + 1;
-            y += font->charHeight;
+            y += font->charHeight * 1.2;
         }
 
         RectFill(win->bmp, 0, buttonBarTop, winWidth, buttonBarHeight, buttonColour);

@@ -124,12 +124,16 @@ void tim_IRQ(void) {
 void cpu_draw_state(int _x, int _y) {
     int x = _x + g_defaultFont->maxCharWidth;
     int y = _y + g_defaultFont->charHeight;
+    DRAW_TEXT(x, y, "KLR Microcontroller state");
+    DRAW_TEXT(x+1, y, "KLR Microcontroller state");
+    x += g_defaultFont->maxCharWidth;
+    y += g_defaultFont->charHeight * 1.2;
     x += DRAW_TEXT(x, y, "PC:%03x  ", pc);
     x += DRAW_TEXT(x, y, "MasterClk:%d  ", master_clk);
     x += DRAW_TEXT(x, y, "RealTime:%4.1fms  ", master_clk * CPU_CLOCK_PERIOD * 1e3);
     x += DRAW_TEXT(x, y, "T:%d  ", timer_counter);
 
-    x = g_defaultFont->maxCharWidth;
+    x = g_defaultFont->maxCharWidth * 2;
     y += g_defaultFont->charHeight * 2;
     x += DRAW_TEXT(x, y, "RAM:    ");
     for (unsigned a = 0; a < 16; a++) {
@@ -137,12 +141,15 @@ void cpu_draw_state(int _x, int _y) {
     }
     for (unsigned a = 0; a < 128; a++) {
         if ((a & 0xf) == 0) {
-            x = g_defaultFont->maxCharWidth;
+            x = g_defaultFont->maxCharWidth * 2;
             y += g_defaultFont->charHeight;
             x += DRAW_TEXT(x, y, "     %x0 ", a >> 4);
         }
         x += DRAW_TEXT(x, y, "%02x ", ram[a]);
     }
+
+    y += g_defaultFont->charHeight * 1.7;
+    HLine(g_window->bmp, 0, y, g_window->bmp->width, g_colourBlack);
 }
 
 void cpu_exec(unsigned num_cycles) {
