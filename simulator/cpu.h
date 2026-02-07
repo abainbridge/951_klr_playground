@@ -43,3 +43,11 @@ extern int master_clk;
 
 extern Byte ram[128];
 extern Byte rom[4096];
+
+// Implement these call-back functions to handle access by the CPU core into the
+// rest of the simulated system.
+Byte read_PB(Byte p);
+Byte read_t1(void);
+void write_p1(Byte d);
+void write_PB(Byte p, Byte val);
+Byte read_external_mem(Byte addr);

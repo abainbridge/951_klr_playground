@@ -18,6 +18,8 @@ static double const MAX_ENGINE_RPM = 6500;
 static double const MAX_TURBO_RPM = 200000;
 
 
+unsigned g_adc_latched_address;
+unsigned g_adc_latch_cycle;
 VirtualCar g_virtual_car;
 static bool g_t1;
 
@@ -35,23 +37,61 @@ static Byte get_graph_val_from_bit_n(Byte val, int n) {
     return (val & 1) * 255;
 }
 
-void write_p1(Byte d) {
-    Byte changes = p1 ^ d;
+void write_p1(Byte val) {
+    Byte changes = p1 ^ val;
+
+    if ((changes & 0x08) && (val & 0x08)) {
+        // ADC ALE
+        g_adc_latched_address = val & 7;
+        g_adc_latch_cycle = master_clk;
+    }
     if (changes & 0x10) {
         // Cycling valve changed
         graph_add_point(FROM_KLR_CYCLING_VALVE_PWM, master_clk, get_graph_val_from_bit_n(p1, 4));
-        graph_add_point(FROM_KLR_CYCLING_VALVE_PWM, master_clk, get_graph_val_from_bit_n(d, 4));
+        graph_add_point(FROM_KLR_CYCLING_VALVE_PWM, master_clk, get_graph_val_from_bit_n(val, 4));
     }
     if (changes & 0x20) {
         // Full load signal changed
         graph_add_point(FROM_KLR_FULL_LOAD_SIGNAL, master_clk, get_graph_val_from_bit_n(p1, 5));
-        graph_add_point(FROM_KLR_FULL_LOAD_SIGNAL, master_clk, get_graph_val_from_bit_n(d, 5));
+        graph_add_point(FROM_KLR_FULL_LOAD_SIGNAL, master_clk, get_graph_val_from_bit_n(val, 5));
     }
-    p1 = d;
+
+    p1 = val;
 }
 
 void write_PB(Byte p, Byte val) {
     p = p;
+}
+
+Byte read_external_mem(Byte addr) {
+    if (pc == 0x44d)
+        master_clk = master_clk;
+
+    double conversion_time = 14e-6; // In seconds. From datasheet.
+    unsigned data_ready_time = g_adc_latch_cycle + CPU_CLOCK_RATE_HZ * conversion_time;
+    if (master_clk < data_ready_time)
+        data_ready_time = data_ready_time; // Error. Output accessed before it was ready.
+
+    switch (g_adc_latched_address) {
+    case 0: // Knock sensor noise level
+        return 0;
+    case 1: // Battery voltage
+        return 200;
+    case 2: // ?
+        return 0;
+    case 3: // Throttle position sensor supply voltage
+        return 40;
+    case 4: // Manifold air pressure
+        return g_virtual_car.manifold_pressure * 127;
+    case 5: // Knock sensor integrator
+        return 0;
+    case 6: // 6 kOhm to ground
+        return 0;
+    case 7: // Throttle position sensor angle
+        return g_virtual_car.throttle_pos * 255;
+    }
+
+    return 0;
 }
 
 void vc_init() {

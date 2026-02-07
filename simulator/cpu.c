@@ -75,12 +75,6 @@ Byte ram[128];
 Byte rom[4096];
 
 
-Byte read_PB(Byte p);
-Byte read_t1(void);
-void write_p1(Byte d);
-void write_PB(Byte p, Byte val);
-
-
 void cpu_reset(void) {
     pc = 0;
     sp = 8;
@@ -137,6 +131,7 @@ void cpu_draw_state(int _x, int _y) {
     x += DRAW_TEXT(x, y, "PC:%03x  ", pc);
     x += DRAW_TEXT(x, y, "MasterClk:%d  ", master_clk);
     x += DRAW_TEXT(x, y, "T:%d  ", timer_counter);
+    x += DRAW_TEXT(x, y, "MemBank:%d  ", !!A11); // TODO: figure out what to do with A11ff
 
     x = g_defaultFont->maxCharWidth * 2;
     y += g_defaultFont->charHeight * 2;
@@ -958,11 +953,11 @@ void cpu_exec(unsigned num_cycles) {
             break;
 
         case 0x80: // MOVX A,@R0
-            acc = ram[reg_pnt];
+            acc = read_external_mem(ram[reg_pnt]);
             clk += 2;
             break;
         case 0x81: // MOVX A,@R1
-            acc = ram[reg_pnt + 1];
+            acc = read_external_mem(ram[reg_pnt + 1]);
             clk += 2;
             break;
         case 0x82: // ILL
@@ -1651,4 +1646,6 @@ void cpu_exec(unsigned num_cycles) {
             }
         }
     }
+
+    return master_clk - target_master_clk + num_cycles;
 }
