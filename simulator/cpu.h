@@ -3,7 +3,7 @@
 #include "types.h"
 
 
-enum { CPU_CLOCK_RATE_HZ = 2250000 };
+enum { CPU_CLOCK_RATE_HZ = 733333 };
 static double CPU_CLOCK_PERIOD = 1.0 / CPU_CLOCK_RATE_HZ;
 
 

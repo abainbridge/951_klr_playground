@@ -5,9 +5,14 @@
 //   Developed by Andre de la Rocha   <adlroc@users.sourceforge.net>
 //                Arlindo M. de Oliveira <dgtec@users.sourceforge.net>
 
+// Own header
 #include "cpu.h"
+
+// Deadfrog headers
 #include "df_font.h"
 #include "df_window.h"
+
+// Standard headers
 #include <stdio.h>
 
 void push(Byte d) {
@@ -131,7 +136,6 @@ void cpu_draw_state(int _x, int _y) {
     y += g_defaultFont->charHeight * 1.2;
     x += DRAW_TEXT(x, y, "PC:%03x  ", pc);
     x += DRAW_TEXT(x, y, "MasterClk:%d  ", master_clk);
-    x += DRAW_TEXT(x, y, "RealTime:%4.1fms  ", master_clk * CPU_CLOCK_PERIOD * 1e3);
     x += DRAW_TEXT(x, y, "T:%d  ", timer_counter);
 
     x = g_defaultFont->maxCharWidth * 2;
@@ -159,7 +163,8 @@ void cpu_exec(unsigned num_cycles) {
     Byte dat;
     int temp;
 
-    for (; num_cycles; num_cycles--) {
+    int target_master_clk = master_clk + num_cycles;
+    while(master_clk < target_master_clk) {
 //        getchar();
         clk = 0;
         if (pc == 0x489)

@@ -84,7 +84,8 @@ void vc_draw_state(int _x, int _y) {
     x = _x + g_defaultFont->maxCharWidth * 2;
     y += g_defaultFont->charHeight * 1.2;
     x += DRAW_TEXT(x, y, "Manifold pressure:%.2f bar  ", g_virtual_car.manifold_pressure);
-    x += DRAW_TEXT(x, y, "Engine power:%.0f BHP ", g_virtual_car.engine_power);
+    x += DRAW_TEXT(x, y, "Engine power:%.0f BHP  ", g_virtual_car.engine_power);
+    x += DRAW_TEXT(x, y, "RealTime:%4.1fms  ", master_clk * CPU_CLOCK_PERIOD * 1e3);
     y += g_defaultFont->charHeight * 1.7;
     HLine(g_window->bmp, 0, y, g_window->bmp->width, g_colourBlack);
 }
