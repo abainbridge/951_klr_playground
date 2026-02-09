@@ -80,7 +80,7 @@ void cpu_reset(void) {
     sp = 8;
     reg_bank = 0;
     write_p1(0xff);
-    p2 = 0xFF;
+    write_p2(0xff);
     ac = carry = f0 = 0;
     A11 = A11ff = 0;
     timer_on = 0;
@@ -998,7 +998,7 @@ void cpu_exec(unsigned num_cycles) {
             clk += 2;
             break;
         case 0x8A: // ORL Pp,#data
-            p2 = p2 | ROM(pc++);
+            write_p2(p2 | ROM(pc++));
             clk += 2;
             break;
         case 0x8B: // ILL
@@ -1088,7 +1088,7 @@ void cpu_exec(unsigned num_cycles) {
             clk += 2;
             break;
         case 0x9A: // ANL Pp,#data
-            p2 = p2 & ROM(pc++);
+            write_p2(p2 & ROM(pc++));
             clk += 2;
             break;
         case 0x9B: // ILL

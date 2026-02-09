@@ -59,6 +59,18 @@ void write_p1(Byte val) {
     p1 = val;
 }
 
+void write_p2(Byte val) {
+    Byte changes = p2 ^ val;
+
+    if (changes & 0x10) {
+        // Blink code changed
+        graph_add_point(FROM_KLR_BLINK_CODE, master_clk, get_graph_val_from_bit_n(p2, 4));
+        graph_add_point(FROM_KLR_BLINK_CODE, master_clk, get_graph_val_from_bit_n(val, 4));
+    }
+
+    p2 = val;
+}
+
 void write_PB(Byte p, Byte val) {
     p = p;
 }
@@ -69,7 +81,7 @@ Byte read_external_mem(Byte addr) {
 
     double conversion_time = 14e-6; // In seconds. From datasheet.
     unsigned data_ready_time = g_adc_latch_cycle + CPU_CLOCK_RATE_HZ * conversion_time;
-    if (master_clk < data_ready_time)
+    if ((unsigned)master_clk < data_ready_time)
         data_ready_time = data_ready_time; // Error. Output accessed before it was ready.
 
     switch (g_adc_latched_address) {

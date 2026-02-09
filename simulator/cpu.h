@@ -48,6 +48,7 @@ extern Byte rom[4096];
 // rest of the simulated system.
 Byte read_PB(Byte p);
 Byte read_t1(void);
-void write_p1(Byte d);
+void write_p1(Byte val);
+void write_p2(Byte val);
 void write_PB(Byte p, Byte val);
 Byte read_external_mem(Byte addr);

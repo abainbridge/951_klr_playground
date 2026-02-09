@@ -55,22 +55,32 @@ static int draw_signals_from_klr(int y) {
     x = g_window->bmp->width * 0.15;
     y += g_defaultFont->charHeight * 1.2;
     int text_x = x - g_defaultFont->maxCharWidth;
+
+    DrawTextRight(g_defaultFont, g_colourBlack, g_window->bmp, text_x, y + text_y_offset, "Ignition");
+    graph_draw(FROM_KLR_IGNITION, master_clk, time_range_to_display, x, y, w, h);
+    y += h + 10;
+
     DrawTextRight(g_defaultFont, g_colourBlack, g_window->bmp, text_x, y + text_y_offset, "Cyc valve");
     graph_draw(FROM_KLR_CYCLING_VALVE_PWM, master_clk, time_range_to_display, x, y, w, h);
     y += h + 10;
+
     DrawTextRight(g_defaultFont, g_colourBlack, g_window->bmp, text_x, y + text_y_offset, "Full load");
     graph_draw(FROM_KLR_FULL_LOAD_SIGNAL, master_clk, time_range_to_display, x, y, w, h);
     y += h + g_defaultFont->charHeight;
+
+    time_range_to_display = CPU_CLOCK_RATE_HZ * 0.5;
+    DrawTextRight(g_defaultFont, g_colourBlack, g_window->bmp, text_x, y + text_y_offset, "Blink code");
+    graph_draw(FROM_KLR_BLINK_CODE, master_clk, time_range_to_display, x, y, w, h);
+    y += h + g_defaultFont->charHeight;
+
     HLine(g_window->bmp, 0, y, g_window->bmp->width, g_colourBlack);
     return y;
 }
 
 //int main() {
 void __stdcall WinMain(void *instance, void *prev_instance, char *cmd_line, int show_cmd) {
-    int desk_width, desk_height;
-    GetDesktopRes(&desk_width, &desk_height);
-    g_window = CreateWin(desk_width / 4, desk_height / 3, WT_WINDOWED_FIXED, "951 KLR Simulator");
-    g_defaultFont = LoadFontFromMemory(df_mono_7x13, sizeof(df_mono_7x13));
+    g_window = CreateWin(700, 800, WT_WINDOWED_FIXED, "951 KLR Simulator");
+    g_defaultFont = LoadFontFromMemory(df_mono_8x15, sizeof(df_mono_8x15));
 
     vc_init();
     cpu_reset();
