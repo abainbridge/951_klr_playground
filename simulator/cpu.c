@@ -160,7 +160,6 @@ void cpu_exec(unsigned num_cycles) {
 
     int target_master_clk = master_clk + num_cycles;
     while(master_clk < target_master_clk) {
-//        getchar();
         clk = 0;
         if (pc == 0x489)
             pc = pc;
@@ -589,6 +588,7 @@ void cpu_exec(unsigned num_cycles) {
             break;
         case 0x55: // STRT T
             timer_on = 1;
+            timer_cycle_accumulator = 0;
             clk++;
             break;
         case 0x56: // JT1
