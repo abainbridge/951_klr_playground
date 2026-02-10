@@ -1,137 +1,674 @@
-// MCS-80 Instruction Set Simulator, based on the CPU simulator from:
-//
-//   O2EM Free Odyssey2 / Videopac+ Emulator
-//   Created by Daniel Boris <dboris@comcast.net>  (c) 1997, 1998
-//   Developed by Andre de la Rocha   <adlroc@users.sourceforge.net>
-//                Arlindo M. de Oliveira <dgtec@users.sourceforge.net>
+// license:BSD-3-Clause
+// copyright-holders:Andrew Bainbridge, Dan Boris, Mirko Buffoni, Aaron Giles, 
+// Couriersud
+// Based on the original work Copyright Mirko Buffoni, Dan Boris
+// 
+// This code is mostly copied from MAME release from 29 Jan 2026. It came with 
+// this TODO:
+// - IRQ and/or timer increment timing is wrong? See test below. After IRQ,
+//   A = 0x20 on MAME, A = 0x22 on the real 8048 as tested by bataais.
+// 
+//   stop tcnt
+//   mov a,0xff
+//   mov t,a
+//   inc a
+// 
+//   en tcnti
+//   strt t
+// 
+//   inc a
+//   inc a
+//   inc a
+//   (etc.)
+// 
+//   With the following test, on MAME, A = 0xff after 30 NOPs, A = 0 after 31
+//   NOPs. On the real 8048, A = 0xff after 31 NOPs, A = 0 after 32 NOPs.
+//   It can mean that STRT T has a 1 cycle delay, or simply that MOV A,T gets
+//   the timer value pre-increment.
+// 
+//   stop tcnt
+//   mov a,0xff
+//   mov t,a
+//   strt t
+// 
+//   nop
+//   nop
+//   nop
+//   (etc.)
+//   mov a,t
+// 
+// - IRQ timing is hacked due to WY-100 needing to take JNI branch before
+//   servicing interrupt (see m.irq_polled), probably related to note above?
 
 // Own header
 #include "cpu.h"
 
 // Deadfrog headers
+#include "df_bitmap.h"
 #include "df_font.h"
 #include "df_window.h"
 
 // Standard headers
+#include <assert.h>
 #include <stdio.h>
 
-void push(Byte d) {
-    ram[sp++] = d;
-    if (sp > 23) {
-        sp = 8;
+
+// ****************************************************************************
+// Defines
+// ****************************************************************************
+
+enum timer_bits {
+    TIMER_ENABLED = 0x01,
+    COUNTER_ENABLED = 0x02
+};
+
+enum flag_bits {
+    C_FLAG = 0x80,
+    A_FLAG = 0x40,
+    F_FLAG = 0x20,
+    B_FLAG = 0x10
+};
+
+// r0-r7 map to memory via reg_ptr
+#define R0 m.reg_ptr[0]
+#define R1 m.reg_ptr[1]
+#define R2 m.reg_ptr[2]
+#define R3 m.reg_ptr[3]
+#define R4 m.reg_ptr[4]
+#define R5 m.reg_ptr[5]
+#define R6 m.reg_ptr[6]
+#define R7 m.reg_ptr[7]
+
+
+// ****************************************************************************
+// Global variables
+// ****************************************************************************
+
+static cpu_t m;
+
+
+// ****************************************************************************
+// Static functions
+// ****************************************************************************
+
+static u8 rom_read(u16 a) { return m.rom[a]; }
+static u8 ram_read(u16 a) { return m.ram[a]; }
+static void ram_write(u16 a, u8 v) { m.ram[a] = v; }
+static u8 ext_mem_read(u8 a) { return cpu_external_mem_read(&m, a); }
+static void ext_mem_write(u16 a, u8 v) { assert(0); }
+static void port1_write(u8 v) { cpu_port1_write(&m, v); m.p1 = v; }
+static void port2_write(u8 v) { cpu_port2_write(&m, v); m.p2 = v; }
+static int t0_read(void) { return cpu_t0_read(); }
+static int t1_read(void) { return cpu_t1_read(); }
+
+// fetch an opcode byte
+static u8 opcode_fetch(void) {
+    u16 address = m.pc;
+    m.pc = ((m.pc + 1) & 0x7ff) | (m.pc & 0x800);
+    return m.rom[address];
+}
+
+// fetch an opcode argument byte
+static u8 argument_fetch(void) {
+    u16 address = m.pc;
+    m.pc = ((m.pc + 1) & 0x7ff) | (m.pc & 0x800);
+    return m.rom[address];
+}
+
+// update reg_ptr to point to the appropriate register bank
+static void update_reg_ptr(void) {
+    m.reg_ptr = &m.ram[(m.psw & B_FLAG) ? 24 : 0];
+}
+
+// push the PC and PSW values onto the stack
+static void push_pc_psw(void) {
+    u8 sp = m.psw & 0x07;
+    ram_write(8 + 2*sp, m.pc);
+    ram_write(9 + 2*sp, ((m.pc >> 8) & 0x0f) | (m.psw & 0xf0));
+    m.psw = (m.psw & 0xf0) | ((sp + 1) & 0x07);
+}
+
+// pull the PC and PSW values from the stack
+static void pull_pc_psw(void) {
+    u8 sp = (m.psw - 1) & 0x07;
+    m.pc = ram_read(8 + 2*sp);
+    m.pc |= ram_read(9 + 2*sp) << 8;
+    m.psw = ((m.pc >> 8) & 0xf0) | sp;
+    m.pc &= (m.irq_in_progress) ? 0x7ff : 0xfff;
+    update_reg_ptr();
+}
+
+// pull the PC value from the stack, leaving the upper part of PSW intact
+static void pull_pc(void) {
+    u8 sp = (m.psw - 1) & 0x07;
+    m.pc = ram_read(8 + 2*sp);
+    m.pc |= ram_read(9 + 2*sp) << 8;
+    m.pc &= (m.irq_in_progress) ? 0x7ff : 0xfff;
+    m.psw = (m.psw & 0xf0) | sp;
+}
+
+static void execute_add(u8 dat) {
+    u16 temp = m.acc + dat;
+    u16 temp4 = (m.acc & 0x0f) + (dat & 0x0f);
+
+    m.psw &= ~(C_FLAG | A_FLAG);
+    m.psw |= (temp4 << 2) & A_FLAG;
+    m.psw |= (temp >> 1) & C_FLAG;
+    m.acc = temp;
+}
+
+static void execute_addc(u8 dat) {
+    u8 carryin = (m.psw & C_FLAG) >> 7;
+    u16 temp = m.acc + dat + carryin;
+    u16 temp4 = (m.acc & 0x0f) + (dat & 0x0f) + carryin;
+
+    m.psw &= ~(C_FLAG | A_FLAG);
+    m.psw |= (temp4 << 2) & A_FLAG;
+    m.psw |= (temp >> 1) & C_FLAG;
+    m.acc = temp;
+}
+
+static void execute_jmp(u16 address) {
+    u16 a11 = (m.irq_in_progress) ? 0 : m.a11;
+    m.pc = address | a11;
+}
+
+static void execute_call(u16 address) {
+    push_pc_psw();
+    execute_jmp(address);
+}
+
+// perform the logic of a conditional jump instruction
+static void execute_jcc(bool result) {
+    u16 pch = m.pc & 0xf00;
+    u8 offset = argument_fetch();
+    if (result)
+        m.pc = pch | offset;
+}
+
+// processing timers and counters
+static void burn_cycles(int count) {
+    if (m.timecount_enabled) {
+        bool timer_over = false;
+
+        // if the timer is enabled, accumulate prescaler cycles
+        if (m.timecount_enabled & TIMER_ENABLED) {
+            u8 old_timer = m.timer_counter;
+            m.prescaler += count;
+            m.timer_counter += m.prescaler >> 5;
+            m.prescaler &= 0x1f;
+            timer_over = m.timer_counter < old_timer;
+        }
+
+        // if the counter is enabled, poll the T1 test input once for each cycle
+        else if (m.timecount_enabled & COUNTER_ENABLED) {
+            for (; count > 0; count--, m.icount--, m.master_clk++) {
+                m.t1_history = (m.t1_history << 1) | (t1_read() & 1);
+                if ((m.t1_history & 3) == 2) {
+                    if (++m.timer_counter == 0)
+                        timer_over = true;
+                }
+            }
+        }
+
+        // if either source caused a timer overflow, set the flags
+        if (timer_over) {
+            m.timer_flag = true;
+
+            // according to the docs, if an overflow occurs with interrupts disabled, the overflow is not stored
+            if (m.tirq_enabled)
+                m.timer_overflow = true;
+        }
+    }
+
+    // (note: if timer counter is enabled, count was already reduced to 0)
+    m.icount -= count;
+    m.master_clk += count;
+}
+
+// check for and process IRQs
+static void check_irqs() {
+    // if something is in progress, we do nothing
+    if (m.irq_in_progress)
+        return;
+
+    // external interrupts take priority
+    else if (m.irq_state && m.xirq_enabled) {
+        // indicate we took the external IRQ
+        //        standard_irq_callback(0, m.pc);
+
+        burn_cycles(2);
+        m.irq_in_progress = true;
+
+        // force JNI to be taken (hack)
+        if (m.irq_polled) {
+            m.pc = ((m.prev_pc + 1) & 0x7ff) | (m.prev_pc & 0x800);
+            execute_jcc(true);
+        }
+
+        // transfer to location 0x03
+        execute_call(0x03);
+    }
+
+    // timer overflow interrupts follow
+    else if (m.timer_overflow && m.tirq_enabled) {
+        //        standard_irq_callback(1, m.pc);
+
+        burn_cycles(2);
+        m.irq_in_progress = true;
+
+        // transfer to location 0x07
+        execute_call(0x07);
+
+        // timer overflow flip-flop is reset once taken
+        m.timer_overflow = false;
     }
 }
 
-#define pull() (sp--, (sp < 8) ? (sp = 23) : 0, ram[sp])
+// The mask of bits that the code can directly affect
+enum { P2_MASK = 0xff };
 
-void make_psw(void) {
-    psw = (carry << 7) | ac | f0 | reg_bank | 0x08;
-    psw |= (sp - 8) >> 1;
+#define OPHANDLER(_name) static void _name(void)
+
+OPHANDLER( illegal ) {
+    burn_cycles(1);
+    printf("Illegal opcode = %02x @ %04X\n", rom_read(m.prev_pc), m.prev_pc);
 }
 
-#define illegal(o)                                                             \
-    {                                                                          \
+OPHANDLER( add_a_r0 )       { burn_cycles(1); execute_add(R0); }
+OPHANDLER( add_a_r1 )       { burn_cycles(1); execute_add(R1); }
+OPHANDLER( add_a_r2 )       { burn_cycles(1); execute_add(R2); }
+OPHANDLER( add_a_r3 )       { burn_cycles(1); execute_add(R3); }
+OPHANDLER( add_a_r4 )       { burn_cycles(1); execute_add(R4); }
+OPHANDLER( add_a_r5 )       { burn_cycles(1); execute_add(R5); }
+OPHANDLER( add_a_r6 )       { burn_cycles(1); execute_add(R6); }
+OPHANDLER( add_a_r7 )       { burn_cycles(1); execute_add(R7); }
+OPHANDLER( add_a_xr0 )      { burn_cycles(1); execute_add(ram_read(R0)); }
+OPHANDLER( add_a_xr1 )      { burn_cycles(1); execute_add(ram_read(R1)); }
+OPHANDLER( add_a_n )        { burn_cycles(2); execute_add(argument_fetch()); }
+
+OPHANDLER( adc_a_r0 )       { burn_cycles(1); execute_addc(R0); }
+OPHANDLER( adc_a_r1 )       { burn_cycles(1); execute_addc(R1); }
+OPHANDLER( adc_a_r2 )       { burn_cycles(1); execute_addc(R2); }
+OPHANDLER( adc_a_r3 )       { burn_cycles(1); execute_addc(R3); }
+OPHANDLER( adc_a_r4 )       { burn_cycles(1); execute_addc(R4); }
+OPHANDLER( adc_a_r5 )       { burn_cycles(1); execute_addc(R5); }
+OPHANDLER( adc_a_r6 )       { burn_cycles(1); execute_addc(R6); }
+OPHANDLER( adc_a_r7 )       { burn_cycles(1); execute_addc(R7); }
+OPHANDLER( adc_a_xr0 )      { burn_cycles(1); execute_addc(ram_read(R0)); }
+OPHANDLER( adc_a_xr1 )      { burn_cycles(1); execute_addc(ram_read(R1)); }
+OPHANDLER( adc_a_n )        { burn_cycles(2); execute_addc(argument_fetch()); }
+
+OPHANDLER( anl_a_r0 )       { burn_cycles(1); m.acc &= R0; }
+OPHANDLER( anl_a_r1 )       { burn_cycles(1); m.acc &= R1; }
+OPHANDLER( anl_a_r2 )       { burn_cycles(1); m.acc &= R2; }
+OPHANDLER( anl_a_r3 )       { burn_cycles(1); m.acc &= R3; }
+OPHANDLER( anl_a_r4 )       { burn_cycles(1); m.acc &= R4; }
+OPHANDLER( anl_a_r5 )       { burn_cycles(1); m.acc &= R5; }
+OPHANDLER( anl_a_r6 )       { burn_cycles(1); m.acc &= R6; }
+OPHANDLER( anl_a_r7 )       { burn_cycles(1); m.acc &= R7; }
+OPHANDLER( anl_a_xr0 )      { burn_cycles(1); m.acc &= ram_read(R0); }
+OPHANDLER( anl_a_xr1 )      { burn_cycles(1); m.acc &= ram_read(R1); }
+OPHANDLER( anl_a_n )        { burn_cycles(2); m.acc &= argument_fetch(); }
+
+OPHANDLER( anl_p1_n )       { burn_cycles(2); port1_write(m.p1 & argument_fetch()); }
+OPHANDLER( anl_p2_n )       { burn_cycles(2); port2_write((m.p2 & argument_fetch()) | ~P2_MASK); }
+
+OPHANDLER( call_0 )         { burn_cycles(2); execute_call(argument_fetch() | 0x000); }
+OPHANDLER( call_1 )         { burn_cycles(2); execute_call(argument_fetch() | 0x100); }
+OPHANDLER( call_2 )         { burn_cycles(2); execute_call(argument_fetch() | 0x200); }
+OPHANDLER( call_3 )         { burn_cycles(2); execute_call(argument_fetch() | 0x300); }
+OPHANDLER( call_4 )         { burn_cycles(2); execute_call(argument_fetch() | 0x400); }
+OPHANDLER( call_5 )         { burn_cycles(2); execute_call(argument_fetch() | 0x500); }
+OPHANDLER( call_6 )         { burn_cycles(2); execute_call(argument_fetch() | 0x600); }
+OPHANDLER( call_7 )         { burn_cycles(2); execute_call(argument_fetch() | 0x700); }
+
+OPHANDLER( clr_a )          { burn_cycles(1); m.acc = 0; }
+OPHANDLER( clr_c )          { burn_cycles(1); m.psw &= ~C_FLAG; }
+OPHANDLER( clr_f0 )         { burn_cycles(1); m.psw &= ~F_FLAG; }
+OPHANDLER( clr_f1 )         { burn_cycles(1); m.f1 = false; }
+
+OPHANDLER( cpl_a )          { burn_cycles(1); m.acc ^= 0xff; }
+OPHANDLER( cpl_c )          { burn_cycles(1); m.psw ^= C_FLAG; }
+OPHANDLER( cpl_f0 )         { burn_cycles(1); m.psw ^= F_FLAG; }
+OPHANDLER( cpl_f1 )         { burn_cycles(1); m.f1 = !m.f1; }
+
+OPHANDLER( da_a ) {
+    burn_cycles(1);
+
+    if ((m.acc & 0x0f) > 0x09 || (m.psw & A_FLAG)) {
+        if (m.acc > 0xf9)
+            m.psw |= C_FLAG;
+        m.acc += 0x06;
     }
-#define undef(i)                                                               \
-    {                                                                          \
-        printf("** unimplemented instruction %x, %x**\n", i, pc);              \
+    if ((m.acc & 0xf0) > 0x90 || (m.psw & C_FLAG)) {
+        m.acc += 0x60;
+        m.psw |= C_FLAG;
     }
-#define ROM(adr) (rom[(adr) & 0xfff])
+}
+
+OPHANDLER( dec_a )          { burn_cycles(1); m.acc--; }
+OPHANDLER( dec_r0 )         { burn_cycles(1); R0--; }
+OPHANDLER( dec_r1 )         { burn_cycles(1); R1--; }
+OPHANDLER( dec_r2 )         { burn_cycles(1); R2--; }
+OPHANDLER( dec_r3 )         { burn_cycles(1); R3--; }
+OPHANDLER( dec_r4 )         { burn_cycles(1); R4--; }
+OPHANDLER( dec_r5 )         { burn_cycles(1); R5--; }
+OPHANDLER( dec_r6 )         { burn_cycles(1); R6--; }
+OPHANDLER( dec_r7 )         { burn_cycles(1); R7--; }
+
+OPHANDLER( dis_i )          { burn_cycles(1); m.xirq_enabled = false; }
+OPHANDLER( dis_tcnti )      { burn_cycles(1); m.tirq_enabled = false; m.timer_overflow = false; }
+
+OPHANDLER( djnz_r0 )        { burn_cycles(2); execute_jcc(--R0 != 0); }
+OPHANDLER( djnz_r1 )        { burn_cycles(2); execute_jcc(--R1 != 0); }
+OPHANDLER( djnz_r2 )        { burn_cycles(2); execute_jcc(--R2 != 0); }
+OPHANDLER( djnz_r3 )        { burn_cycles(2); execute_jcc(--R3 != 0); }
+OPHANDLER( djnz_r4 )        { burn_cycles(2); execute_jcc(--R4 != 0); }
+OPHANDLER( djnz_r5 )        { burn_cycles(2); execute_jcc(--R5 != 0); }
+OPHANDLER( djnz_r6 )        { burn_cycles(2); execute_jcc(--R6 != 0); }
+OPHANDLER( djnz_r7 )        { burn_cycles(2); execute_jcc(--R7 != 0); }
+
+OPHANDLER( en_i )           { burn_cycles(1); m.xirq_enabled = true; }
+OPHANDLER( en_tcnti )       { burn_cycles(1); m.tirq_enabled = true; }
+
+OPHANDLER( inc_a )          { burn_cycles(1); m.acc++; }
+OPHANDLER( inc_r0 )         { burn_cycles(1); R0++; }
+OPHANDLER( inc_r1 )         { burn_cycles(1); R1++; }
+OPHANDLER( inc_r2 )         { burn_cycles(1); R2++; }
+OPHANDLER( inc_r3 )         { burn_cycles(1); R3++; }
+OPHANDLER( inc_r4 )         { burn_cycles(1); R4++; }
+OPHANDLER( inc_r5 )         { burn_cycles(1); R5++; }
+OPHANDLER( inc_r6 )         { burn_cycles(1); R6++; }
+OPHANDLER( inc_r7 )         { burn_cycles(1); R7++; }
+OPHANDLER( inc_xr0 )        { burn_cycles(1); ram_write(R0, ram_read(R0) + 1); }
+OPHANDLER( inc_xr1 )        { burn_cycles(1); ram_write(R1, ram_read(R1) + 1); }
+
+OPHANDLER( jb_0 )           { burn_cycles(2); execute_jcc((m.acc & 0x01) != 0); }
+OPHANDLER( jb_1 )           { burn_cycles(2); execute_jcc((m.acc & 0x02) != 0); }
+OPHANDLER( jb_2 )           { burn_cycles(2); execute_jcc((m.acc & 0x04) != 0); }
+OPHANDLER( jb_3 )           { burn_cycles(2); execute_jcc((m.acc & 0x08) != 0); }
+OPHANDLER( jb_4 )           { burn_cycles(2); execute_jcc((m.acc & 0x10) != 0); }
+OPHANDLER( jb_5 )           { burn_cycles(2); execute_jcc((m.acc & 0x20) != 0); }
+OPHANDLER( jb_6 )           { burn_cycles(2); execute_jcc((m.acc & 0x40) != 0); }
+OPHANDLER( jb_7 )           { burn_cycles(2); execute_jcc((m.acc & 0x80) != 0); }
+OPHANDLER( jc )             { burn_cycles(2); execute_jcc((m.psw & C_FLAG) != 0); }
+OPHANDLER( jf0 )            { burn_cycles(2); execute_jcc((m.psw & F_FLAG) != 0); }
+OPHANDLER( jf1 )            { burn_cycles(2); execute_jcc(m.f1); }
+OPHANDLER( jnc )            { burn_cycles(2); execute_jcc((m.psw & C_FLAG) == 0); }
+OPHANDLER( jni )            { burn_cycles(2); m.irq_polled = (m.irq_state == 0); execute_jcc(m.irq_state != 0); }
+OPHANDLER( jnt_0 )          { burn_cycles(2); execute_jcc(t0_read() == 0); }
+OPHANDLER( jnt_1 )          { burn_cycles(2); execute_jcc(t1_read() == 0); }
+OPHANDLER( jnz )            { burn_cycles(2); execute_jcc(m.acc != 0); }
+OPHANDLER( jtf )            { burn_cycles(2); execute_jcc(m.timer_flag); m.timer_flag = false; }
+OPHANDLER( jt_0 )           { burn_cycles(2); execute_jcc(t0_read() != 0); }
+OPHANDLER( jt_1 )           { burn_cycles(2); execute_jcc(t1_read() != 0); }
+OPHANDLER( jz )             { burn_cycles(2); execute_jcc(m.acc == 0); }
+
+OPHANDLER( jmp_0 )          { burn_cycles(2); execute_jmp(argument_fetch() | 0x000); }
+OPHANDLER( jmp_1 )          { burn_cycles(2); execute_jmp(argument_fetch() | 0x100); }
+OPHANDLER( jmp_2 )          { burn_cycles(2); execute_jmp(argument_fetch() | 0x200); }
+OPHANDLER( jmp_3 )          { burn_cycles(2); execute_jmp(argument_fetch() | 0x300); }
+OPHANDLER( jmp_4 )          { burn_cycles(2); execute_jmp(argument_fetch() | 0x400); }
+OPHANDLER( jmp_5 )          { burn_cycles(2); execute_jmp(argument_fetch() | 0x500); }
+OPHANDLER( jmp_6 )          { burn_cycles(2); execute_jmp(argument_fetch() | 0x600); }
+OPHANDLER( jmp_7 )          { burn_cycles(2); execute_jmp(argument_fetch() | 0x700); }
+OPHANDLER( jmpp_xa )        { burn_cycles(2); m.pc &= 0xf00; m.pc |= rom_read(m.pc | m.acc); }
+
+OPHANDLER( mov_a_n )        { burn_cycles(2); m.acc = argument_fetch(); }
+OPHANDLER( mov_a_psw )      { burn_cycles(1); m.acc = m.psw | 0x08; }
+OPHANDLER( mov_a_r0 )       { burn_cycles(1); m.acc = R0; }
+OPHANDLER( mov_a_r1 )       { burn_cycles(1); m.acc = R1; }
+OPHANDLER( mov_a_r2 )       { burn_cycles(1); m.acc = R2; }
+OPHANDLER( mov_a_r3 )       { burn_cycles(1); m.acc = R3; }
+OPHANDLER( mov_a_r4 )       { burn_cycles(1); m.acc = R4; }
+OPHANDLER( mov_a_r5 )       { burn_cycles(1); m.acc = R5; }
+OPHANDLER( mov_a_r6 )       { burn_cycles(1); m.acc = R6; }
+OPHANDLER( mov_a_r7 )       { burn_cycles(1); m.acc = R7; }
+OPHANDLER( mov_a_xr0 )      { burn_cycles(1); m.acc = ram_read(R0); }
+OPHANDLER( mov_a_xr1 )      { burn_cycles(1); m.acc = ram_read(R1); }
+OPHANDLER( mov_a_t )        { burn_cycles(1); m.acc = m.timer_counter; }
+
+OPHANDLER( mov_psw_a )      { burn_cycles(1); m.psw = m.acc & ~0x08; update_reg_ptr(); }
+OPHANDLER( mov_r0_a )       { burn_cycles(1); R0 = m.acc; }
+OPHANDLER( mov_r1_a )       { burn_cycles(1); R1 = m.acc; }
+OPHANDLER( mov_r2_a )       { burn_cycles(1); R2 = m.acc; }
+OPHANDLER( mov_r3_a )       { burn_cycles(1); R3 = m.acc; }
+OPHANDLER( mov_r4_a )       { burn_cycles(1); R4 = m.acc; }
+OPHANDLER( mov_r5_a )       { burn_cycles(1); R5 = m.acc; }
+OPHANDLER( mov_r6_a )       { burn_cycles(1); R6 = m.acc; }
+OPHANDLER( mov_r7_a )       { burn_cycles(1); R7 = m.acc; }
+OPHANDLER( mov_r0_n )       { burn_cycles(2); R0 = argument_fetch(); }
+OPHANDLER( mov_r1_n )       { burn_cycles(2); R1 = argument_fetch(); }
+OPHANDLER( mov_r2_n )       { burn_cycles(2); R2 = argument_fetch(); }
+OPHANDLER( mov_r3_n )       { burn_cycles(2); R3 = argument_fetch(); }
+OPHANDLER( mov_r4_n )       { burn_cycles(2); R4 = argument_fetch(); }
+OPHANDLER( mov_r5_n )       { burn_cycles(2); R5 = argument_fetch(); }
+OPHANDLER( mov_r6_n )       { burn_cycles(2); R6 = argument_fetch(); }
+OPHANDLER( mov_r7_n )       { burn_cycles(2); R7 = argument_fetch(); }
+OPHANDLER( mov_t_a )        { burn_cycles(1); m.timer_counter = m.acc; }
+OPHANDLER( mov_xr0_a )      { burn_cycles(1); ram_write(R0, m.acc); }
+OPHANDLER( mov_xr1_a )      { burn_cycles(1); ram_write(R1, m.acc); }
+OPHANDLER( mov_xr0_n )      { burn_cycles(2); ram_write(R0, argument_fetch()); }
+OPHANDLER( mov_xr1_n )      { burn_cycles(2); ram_write(R1, argument_fetch()); }
+
+OPHANDLER( movp_a_xa )      { burn_cycles(2); m.acc = rom_read((m.pc & 0xf00) | m.acc); }
+OPHANDLER( movp3_a_xa )     { burn_cycles(2); m.acc = rom_read(0x300 | m.acc); }
+
+OPHANDLER( movx_a_xr0 )     { burn_cycles(2); m.acc = ext_mem_read(R0); }
+OPHANDLER( movx_a_xr1 )     { burn_cycles(2); m.acc = ext_mem_read(R1); }
+OPHANDLER( movx_xr0_a )     { burn_cycles(2); ext_mem_write(R0, m.acc); }
+OPHANDLER( movx_xr1_a )     { burn_cycles(2); ext_mem_write(R1, m.acc); }
+
+OPHANDLER( nop )            { burn_cycles(1); }
+
+OPHANDLER( orl_a_r0 )       { burn_cycles(1); m.acc |= R0; }
+OPHANDLER( orl_a_r1 )       { burn_cycles(1); m.acc |= R1; }
+OPHANDLER( orl_a_r2 )       { burn_cycles(1); m.acc |= R2; }
+OPHANDLER( orl_a_r3 )       { burn_cycles(1); m.acc |= R3; }
+OPHANDLER( orl_a_r4 )       { burn_cycles(1); m.acc |= R4; }
+OPHANDLER( orl_a_r5 )       { burn_cycles(1); m.acc |= R5; }
+OPHANDLER( orl_a_r6 )       { burn_cycles(1); m.acc |= R6; }
+OPHANDLER( orl_a_r7 )       { burn_cycles(1); m.acc |= R7; }
+OPHANDLER( orl_a_xr0 )      { burn_cycles(1); m.acc |= ram_read(R0); }
+OPHANDLER( orl_a_xr1 )      { burn_cycles(1); m.acc |= ram_read(R1); }
+OPHANDLER( orl_a_n )        { burn_cycles(2); m.acc |= argument_fetch(); }
+
+OPHANDLER( orl_p1_n )       { burn_cycles(2); port1_write(m.p1 | argument_fetch()); }
+OPHANDLER( orl_p2_n )       { burn_cycles(2); port2_write((m.p2 | argument_fetch()) & P2_MASK); }
+
+OPHANDLER( ret )            { burn_cycles(2); pull_pc(); }
+OPHANDLER( retr ) {
+    burn_cycles(2);
+
+    // implicitly clear the IRQ in progress flip flop
+    m.irq_in_progress = false;
+    pull_pc_psw();
+}
+
+OPHANDLER( rl_a )           { burn_cycles(1); m.acc = (m.acc << 1) | (m.acc >> 7); }
+OPHANDLER( rlc_a )          { burn_cycles(1); u8 newc = m.acc & C_FLAG; m.acc = (m.acc << 1) | (m.psw >> 7); m.psw = (m.psw & ~C_FLAG) | newc; }
+
+OPHANDLER( rr_a )           { burn_cycles(1); m.acc = (m.acc >> 1) | (m.acc << 7); }
+OPHANDLER( rrc_a )          { burn_cycles(1); u8 newc = (m.acc << 7) & C_FLAG; m.acc = (m.acc >> 1) | (m.psw & C_FLAG); m.psw = (m.psw & ~C_FLAG) | newc; }
+
+OPHANDLER( sel_mb0 )        { burn_cycles(1); m.a11 = 0x000; }
+OPHANDLER( sel_mb1 )        { burn_cycles(1); m.a11 = 0x800; }
+
+OPHANDLER( sel_rb0 )        { burn_cycles(1); m.psw &= ~B_FLAG; update_reg_ptr(); }
+OPHANDLER( sel_rb1 )        { burn_cycles(1); m.psw |=  B_FLAG; update_reg_ptr(); }
+
+OPHANDLER( stop_tcnt )      { burn_cycles(1); m.timecount_enabled = 0; }
+OPHANDLER( strt_t )         { burn_cycles(1); m.timecount_enabled = TIMER_ENABLED; m.prescaler = 0; }
+OPHANDLER( strt_cnt ) {
+    burn_cycles(1);
+    if (!(m.timecount_enabled & COUNTER_ENABLED))
+        m.t1_history = t1_read();
+
+    m.timecount_enabled = COUNTER_ENABLED;
+}
+
+OPHANDLER( swap_a )         { burn_cycles(1); m.acc = (m.acc << 4) | (m.acc >> 4); }
+
+OPHANDLER( xch_a_r0 )       { burn_cycles(1); u8 tmp = m.acc; m.acc = R0; R0 = tmp; }
+OPHANDLER( xch_a_r1 )       { burn_cycles(1); u8 tmp = m.acc; m.acc = R1; R1 = tmp; }
+OPHANDLER( xch_a_r2 )       { burn_cycles(1); u8 tmp = m.acc; m.acc = R2; R2 = tmp; }
+OPHANDLER( xch_a_r3 )       { burn_cycles(1); u8 tmp = m.acc; m.acc = R3; R3 = tmp; }
+OPHANDLER( xch_a_r4 )       { burn_cycles(1); u8 tmp = m.acc; m.acc = R4; R4 = tmp; }
+OPHANDLER( xch_a_r5 )       { burn_cycles(1); u8 tmp = m.acc; m.acc = R5; R5 = tmp; }
+OPHANDLER( xch_a_r6 )       { burn_cycles(1); u8 tmp = m.acc; m.acc = R6; R6 = tmp; }
+OPHANDLER( xch_a_r7 )       { burn_cycles(1); u8 tmp = m.acc; m.acc = R7; R7 = tmp; }
+OPHANDLER( xch_a_xr0 )      { burn_cycles(1); u8 tmp = m.acc; m.acc = ram_read(R0); ram_write(R0, tmp); }
+OPHANDLER( xch_a_xr1 )      { burn_cycles(1); u8 tmp = m.acc; m.acc = ram_read(R1); ram_write(R1, tmp); }
+
+OPHANDLER( xchd_a_xr0 )     { burn_cycles(1); u8 oldram = ram_read(R0); ram_write(R0, (oldram & 0xf0) | (m.acc & 0x0f)); m.acc = (m.acc & 0xf0) | (oldram & 0x0f); }
+OPHANDLER( xchd_a_xr1 )     { burn_cycles(1); u8 oldram = ram_read(R1); ram_write(R1, (oldram & 0xf0) | (m.acc & 0x0f)); m.acc = (m.acc & 0xf0) | (oldram & 0x0f); }
+
+OPHANDLER( xrl_a_r0 )       { burn_cycles(1); m.acc ^= R0; }
+OPHANDLER( xrl_a_r1 )       { burn_cycles(1); m.acc ^= R1; }
+OPHANDLER( xrl_a_r2 )       { burn_cycles(1); m.acc ^= R2; }
+OPHANDLER( xrl_a_r3 )       { burn_cycles(1); m.acc ^= R3; }
+OPHANDLER( xrl_a_r4 )       { burn_cycles(1); m.acc ^= R4; }
+OPHANDLER( xrl_a_r5 )       { burn_cycles(1); m.acc ^= R5; }
+OPHANDLER( xrl_a_r6 )       { burn_cycles(1); m.acc ^= R6; }
+OPHANDLER( xrl_a_r7 )       { burn_cycles(1); m.acc ^= R7; }
+OPHANDLER( xrl_a_xr0 )      { burn_cycles(1); m.acc ^= ram_read(R0); }
+OPHANDLER( xrl_a_xr1 )      { burn_cycles(1); m.acc ^= ram_read(R1); }
+OPHANDLER( xrl_a_n )        { burn_cycles(2); m.acc ^= argument_fetch(); }
 
 
-Byte acc;   // Accumulator
-ADDRESS pc; // Program counter
-long clk;   // Number of cycles taken by the current instruction.
+#define OP(_a) &_a
 
-Byte timer_counter; // timer/event-counter register
-Byte reg_pnt;  // pointer to register bank. Is an index into RAM. 0=reg bank 0, 24=reg bank 1
-Byte timer_on; // 0=timer off/1=timer on
-Byte count_on; // 0=count off/1=count on
-Byte psw;      // Processor status word
-Byte sp;       // Stack pointer (part of psw)
+typedef void (*mcs48_ophandler)(void);
 
-Byte p1;        // I/O port 1
-Byte p2;        // I/O port 2
-Byte xirq_pend; // external IRQ pending
-Byte tirq_pend; // timer IRQ pending
-Byte t_flag;    // Timer flag
+static const mcs48_ophandler s_mcs48_opcodes[256] = {
+    OP(nop),        OP(illegal),    OP(illegal),   OP(add_a_n),   OP(jmp_0),     OP(en_i),       OP(illegal),   OP(dec_a),      // 00
+    OP(illegal),    OP(illegal),    OP(illegal),   OP(illegal),   OP(illegal),   OP(illegal),    OP(illegal),   OP(illegal),
+    OP(inc_xr0),    OP(inc_xr1),    OP(jb_0),      OP(adc_a_n),   OP(call_0),    OP(dis_i),      OP(jtf),       OP(inc_a),      // 10
+    OP(inc_r0),     OP(inc_r1),     OP(inc_r2),    OP(inc_r3),    OP(inc_r4),    OP(inc_r5),     OP(inc_r6),    OP(inc_r7),
+    OP(xch_a_xr0),  OP(xch_a_xr1),  OP(illegal),   OP(mov_a_n),   OP(jmp_1),     OP(en_tcnti),   OP(jnt_0),     OP(clr_a),      // 20
+    OP(xch_a_r0),   OP(xch_a_r1),   OP(xch_a_r2),  OP(xch_a_r3),  OP(xch_a_r4),  OP(xch_a_r5),   OP(xch_a_r6),  OP(xch_a_r7),
+    OP(xchd_a_xr0), OP(xchd_a_xr1), OP(jb_1),      OP(illegal),   OP(call_1),    OP(dis_tcnti),  OP(jt_0),      OP(cpl_a),      // 30
+    OP(illegal),    OP(illegal),    OP(illegal),   OP(illegal),   OP(illegal),   OP(illegal),    OP(illegal),   OP(illegal),
+    OP(orl_a_xr0),  OP(orl_a_xr1),  OP(mov_a_t),   OP(orl_a_n),   OP(jmp_2),     OP(strt_cnt),   OP(jnt_1),     OP(swap_a),     // 40
+    OP(orl_a_r0),   OP(orl_a_r1),   OP(orl_a_r2),  OP(orl_a_r3),  OP(orl_a_r4),  OP(orl_a_r5),   OP(orl_a_r6),  OP(orl_a_r7),
+    OP(anl_a_xr0),  OP(anl_a_xr1),  OP(jb_2),      OP(anl_a_n),   OP(call_2),    OP(strt_t),     OP(jt_1),      OP(da_a),       // 50
+    OP(anl_a_r0),   OP(anl_a_r1),   OP(anl_a_r2),  OP(anl_a_r3),  OP(anl_a_r4),  OP(anl_a_r5),   OP(anl_a_r6),  OP(anl_a_r7),
+    OP(add_a_xr0),  OP(add_a_xr1),  OP(mov_t_a),   OP(illegal),   OP(jmp_3),     OP(stop_tcnt),  OP(illegal),   OP(rrc_a),      // 60
+    OP(add_a_r0),   OP(add_a_r1),   OP(add_a_r2),  OP(add_a_r3),  OP(add_a_r4),  OP(add_a_r5),   OP(add_a_r6),  OP(add_a_r7),
+    OP(adc_a_xr0),  OP(adc_a_xr1),  OP(jb_3),      OP(illegal),   OP(call_3),    OP(illegal),    OP(jf1),       OP(rr_a),       // 70
+    OP(adc_a_r0),   OP(adc_a_r1),   OP(adc_a_r2),  OP(adc_a_r3),  OP(adc_a_r4),  OP(adc_a_r5),   OP(adc_a_r6),  OP(adc_a_r7),
+    OP(movx_a_xr0), OP(movx_a_xr1), OP(illegal),   OP(ret),       OP(jmp_4),     OP(clr_f0),     OP(jni),       OP(illegal),    // 80
+    OP(illegal),    OP(orl_p1_n),   OP(orl_p2_n),  OP(illegal),   OP(illegal),   OP(illegal),    OP(illegal),   OP(illegal),
+    OP(movx_xr0_a), OP(movx_xr1_a), OP(jb_4),      OP(retr),      OP(call_4),    OP(cpl_f0),     OP(jnz),       OP(clr_c),      // 90
+    OP(illegal),    OP(anl_p1_n),   OP(anl_p2_n),  OP(illegal),   OP(illegal),   OP(illegal),    OP(illegal),   OP(illegal),
+    OP(mov_xr0_a),  OP(mov_xr1_a),  OP(illegal),   OP(movp_a_xa), OP(jmp_5),     OP(clr_f1),     OP(illegal),   OP(cpl_c),      // A0
+    OP(mov_r0_a),   OP(mov_r1_a),   OP(mov_r2_a),  OP(mov_r3_a),  OP(mov_r4_a),  OP(mov_r5_a),   OP(mov_r6_a),  OP(mov_r7_a),
+    OP(mov_xr0_n),  OP(mov_xr1_n),  OP(jb_5),      OP(jmpp_xa),   OP(call_5),    OP(cpl_f1),     OP(jf0),       OP(illegal),    // B0
+    OP(mov_r0_n),   OP(mov_r1_n),   OP(mov_r2_n),  OP(mov_r3_n),  OP(mov_r4_n),  OP(mov_r5_n),   OP(mov_r6_n),  OP(mov_r7_n),
+    OP(illegal),    OP(illegal),    OP(illegal),   OP(illegal),   OP(jmp_6),     OP(sel_rb0),    OP(jz),        OP(mov_a_psw),  // C0
+    OP(dec_r0),     OP(dec_r1),     OP(dec_r2),    OP(dec_r3),    OP(dec_r4),    OP(dec_r5),     OP(dec_r6),    OP(dec_r7),
+    OP(xrl_a_xr0),  OP(xrl_a_xr1),  OP(jb_6),      OP(xrl_a_n),   OP(call_6),    OP(sel_rb1),    OP(illegal),   OP(mov_psw_a),  // D0
+    OP(xrl_a_r0),   OP(xrl_a_r1),   OP(xrl_a_r2),  OP(xrl_a_r3),  OP(xrl_a_r4),  OP(xrl_a_r5),   OP(xrl_a_r6),  OP(xrl_a_r7),
+    OP(illegal),    OP(illegal),    OP(illegal),   OP(movp3_a_xa),OP(jmp_7),     OP(sel_mb0),    OP(jnc),       OP(rl_a),       // E0
+    OP(djnz_r0),    OP(djnz_r1),    OP(djnz_r2),   OP(djnz_r3),   OP(djnz_r4),   OP(djnz_r5),    OP(djnz_r6),   OP(djnz_r7),
+    OP(mov_a_xr0),  OP(mov_a_xr1),  OP(jb_7),      OP(illegal),   OP(call_7),    OP(sel_mb1),    OP(jc),        OP(rlc_a),      // F0
+    OP(mov_a_r0),   OP(mov_a_r1),   OP(mov_a_r2),  OP(mov_a_r3),  OP(mov_a_r4),  OP(mov_a_r5),   OP(mov_a_r6),  OP(mov_a_r7)
+};
 
-ADDRESS A11; // PC bit 11
-ADDRESS A11ff;
-Byte reg_bank;// Register Bank (part of psw)
-Byte f0;      // Flag Bit (part of psw)
-Byte f1;      // Flag Bit 1
-Byte ac;      // Aux Carry (part of psw)
-Byte carry;   // Carry flag (part of psw)
-Byte xirq_en; // external IRQ's enabled
-Byte tirq_en; // Timer IRQ enabled
-Byte irq_ex;  // IRQ executing
 
-int timer_cycle_accumulator;
-int int_clk;    // counter for length of /INT pulses for JNI
-int master_clk;
+// *****************************************************************************
+// Public functions
+// *****************************************************************************
 
-Byte ram[128];
-Byte rom[4096];
+cpu_t *cpu_get(void) {
+    return &m;
+}
 
+// void cpu_power_on() {
+//     m.prev_pc = 0;
+//     m.pc = 0;
+// 
+//     m.acc = 0;
+//     m.psw = 0;
+//     m.f1 = false;
+//     m.a11 = 0;
+//     m.p1 = 0;
+//     m.p2 = 0;
+//     m.timer = 0;
+//     m.prescaler = 0;
+//     m.t1_history = 0;
+// 
+//     m.irq_state = false;
+//     m.irq_polled = false;
+//     m.irq_in_progress = false;
+//     m.timer_overflow = false;
+//     m.timer_flag = false;
+//     m.tirq_enabled = false;
+//     m.xirq_enabled = false;
+//     m.timecount_enabled = 0;
+// 
+//     // ensure that reg_ptr is valid before get_info gets called
+//     update_reg_ptr();
+// }
 
 void cpu_reset(void) {
-    pc = 0;
-    sp = 8;
-    reg_bank = 0;
-    write_p1(0xff);
-    write_p2(0xff);
-    ac = carry = f0 = 0;
-    A11 = A11ff = 0;
-    timer_on = 0;
-    count_on = 0;
-    reg_pnt = 0;
-    tirq_en = xirq_en = irq_ex = xirq_pend = tirq_pend = 0;
+    // confirmed from reset description
+    m.pc = 0;
+    m.psw = m.psw & (C_FLAG | A_FLAG);
+    update_reg_ptr();
+    m.f1 = false;
+    m.a11 = 0;
+
+    m.tirq_enabled = false;
+    m.xirq_enabled = false;
+    m.timecount_enabled = 0;
+    m.timer_flag = false;
+
+    // confirmed from interrupt logic description
+    m.irq_in_progress = false;
+    m.timer_overflow = false;
+
+    m.irq_polled = false;
+
+    // port 1 and port 2 are set to input mode
+    port1_write(0xff);
+    port2_write(0xff);
 }
 
-void ext_IRQ(void) {
-    int_clk = 5; // length of pulse on /INT
-    if (xirq_en && !irq_ex) {
-        irq_ex = 1;
-        xirq_pend = 0;
-        clk += 2;
-        make_psw();
-        push(pc & 0xFF);
-        push(((pc & 0xF00) >> 8) | (psw & 0xF0));
-        pc = 0x03;
-        A11ff = A11;
-        A11 = 0;
-    }
-}
+void cpu_execute(int num_cycles) {
+    m.icount += num_cycles;
+    update_reg_ptr();
 
-void tim_IRQ(void) {
-    if (tirq_en && !irq_ex) {
-        irq_ex = 2;
-        tirq_pend = 0;
-        clk += 2;
-        make_psw();
-        push(pc & 0xFF);
-        push(((pc & 0xF00) >> 8) | (psw & 0xF0));
-        pc = 0x07;
-        A11ff = A11;
-        A11 = 0;
-    }
+    // iterate over remaining cycles, guaranteeing at least one instruction
+    do {
+        // check interrupts
+        check_irqs();
+        m.irq_polled = false;
+
+        m.prev_pc = m.pc;
+
+        // fetch and process opcode
+        unsigned opcode = opcode_fetch();
+        (*s_mcs48_opcodes[opcode])();
+    } while (m.icount > 0);
 }
 
 #define DRAW_TEXT(x, y, msg, ...) \
     DrawTextLeft(g_defaultFont, g_colourBlack, g_window->bmp, x, y, msg, ##__VA_ARGS__)
 
 void cpu_draw_state(int _x, int _y) {
+    cpu_t *cpu = cpu_get();
     int x = _x + g_defaultFont->maxCharWidth;
     int y = _y + g_defaultFont->charHeight;
     DRAW_TEXT(x, y, "KLR Microcontroller state");
-    DRAW_TEXT(x+1, y, "KLR Microcontroller state");
+    DRAW_TEXT(x + 1, y, "KLR Microcontroller state");
     x += g_defaultFont->maxCharWidth;
     y += g_defaultFont->charHeight * 1.2;
-    x += DRAW_TEXT(x, y, "PC:%03x  ", pc);
-    x += DRAW_TEXT(x, y, "MasterClk:%d  ", master_clk);
-    x += DRAW_TEXT(x, y, "T:%d  ", timer_counter);
-    x += DRAW_TEXT(x, y, "MemBank:%d  ", !!A11); // TODO: figure out what to do with A11ff
+    x += DRAW_TEXT(x, y, "PC:%03x  ", cpu->pc);
+    x += DRAW_TEXT(x, y, "MasterClk:%d  ", cpu->master_clk);
+    x += DRAW_TEXT(x, y, "T:%d  ", cpu->timer_counter);
+    x += DRAW_TEXT(x, y, "MemBank:%d  ", !!cpu->a11);
 
     x = g_defaultFont->maxCharWidth * 2;
     y += g_defaultFont->charHeight * 2;
@@ -145,1507 +682,9 @@ void cpu_draw_state(int _x, int _y) {
             y += g_defaultFont->charHeight;
             x += DRAW_TEXT(x, y, "     %x0 ", a >> 4);
         }
-        x += DRAW_TEXT(x, y, "%02x ", ram[a]);
+        x += DRAW_TEXT(x, y, "%02x ", cpu->ram[a]);
     }
 
     y += g_defaultFont->charHeight * 1.7;
     HLine(g_window->bmp, 0, y, g_window->bmp->width, g_colourBlack);
-}
-
-void cpu_exec(unsigned num_cycles) {
-    Byte op;
-    ADDRESS adr;
-    Byte dat;
-    int temp;
-
-    int target_master_clk = master_clk + num_cycles;
-    while(master_clk < target_master_clk) {
-        clk = 0;
-        if (pc == 0x489)
-            pc = pc;
-        op = ROM(pc++);
-
-        switch (op) {
-        case 0x00: // NOP
-            clk++;
-            break;
-        case 0x01: // ILL
-            illegal(op);
-            clk++;
-            break;
-        case 0x02: // OUTL BUS,A
-            clk += 2;
-            undef(0x02);
-            break;
-        case 0x03: // ADD A,#data
-            clk += 2;
-            carry = ac = 0;
-            dat = ROM(pc++);
-            if (((acc & 0x0f) + (dat & 0x0f)) > 0x0f)
-                ac = 0x40;
-            temp = acc + dat;
-            if (temp > 0xFF)
-                carry = 1;
-            acc = (temp & 0xFF);
-            break;
-        case 0x04: // JMP
-            pc = ROM(pc) | A11;
-            clk += 2;
-            break;
-        case 0x05: // EN I
-            xirq_en = 1;
-            clk++;
-            break;
-        case 0x06: // ILL
-            clk++;
-            illegal(op);
-            break;
-        case 0x07: // DEC A
-            acc--;
-            clk++;
-            break;
-
-        // These opcodes do not occur in 951 code
-        case 0x08: // IN A,BUS
-        case 0x09: // IN A,Pp
-        case 0x0A: // IN A,Pp
-        case 0x0B: // ILL
-        case 0x0C: // MOVD A,P4
-        case 0x0D: // MOVD A,P5
-        case 0x0E: // MOVD A,P6
-        case 0x0F: // MOVD A,P7
-            clk++;
-            illegal(op);
-            break;
-
-        case 0x10: // INC @Ri
-            ram[ram[reg_pnt] & 0x7F]++;
-            clk++;
-            break;
-        case 0x11: // INC @Ri
-            ram[ram[reg_pnt + 1] & 0x7F]++;
-            clk++;
-            break;
-        case 0x12: // JBb address
-            clk += 2;
-            dat = ROM(pc);
-            if (acc & 0x01)
-                pc = (pc & 0xF00) | dat;
-            else
-                pc++;
-            break;
-        case 0x13: // ADDC A,#data
-            clk += 2;
-            dat = ROM(pc++);
-            ac = 0;
-            if (((acc & 0x0f) + (dat & 0x0f) + carry) > 0x0f)
-                ac = 0x40;
-            temp = acc + dat + carry;
-            carry = 0;
-            if (temp > 0xFF)
-                carry = 1;
-            acc = (temp & 0xFF);
-            break;
-
-        case 0x14: // CALL
-            make_psw();
-            adr = ROM(pc) | A11;
-            pc++;
-            clk += 2;
-            push(pc & 0xFF);
-            push(((pc & 0xF00) >> 8) | (psw & 0xF0));
-            pc = adr;
-            break;
-        case 0x15: // DIS I
-            xirq_en = 0;
-            clk++;
-            break;
-        case 0x16: // JTF
-            clk += 2;
-            dat = ROM(pc);
-            if (t_flag)
-                pc = (pc & 0xF00) | dat;
-            else
-                pc++;
-            t_flag = 0;
-            break;
-        case 0x17: // INC A
-            acc++;
-            clk++;
-            break;
-        case 0x18: // INC Rr
-            ram[reg_pnt]++;
-            clk++;
-            break;
-        case 0x19: // INC Rr
-            ram[reg_pnt + 1]++;
-            clk++;
-            break;
-        case 0x1A: // INC Rr
-            ram[reg_pnt + 2]++;
-            clk++;
-            break;
-        case 0x1B: // INC Rr
-            ram[reg_pnt + 3]++;
-            clk++;
-            break;
-        case 0x1C: // INC Rr
-            ram[reg_pnt + 4]++;
-            clk++;
-            break;
-        case 0x1D: // INC Rr
-            ram[reg_pnt + 5]++;
-            clk++;
-            break;
-        case 0x1E: // INC Rr
-            ram[reg_pnt + 6]++;
-            clk++;
-            break;
-        case 0x1F: // INC Rr
-            ram[reg_pnt + 7]++;
-            clk++;
-            break;
-        case 0x20: // XCH A,@Ri
-            clk++;
-            dat = acc;
-            acc = ram[ram[reg_pnt] & 0x7F];
-            ram[ram[reg_pnt] & 0x7F] = dat;
-            break;
-        case 0x21: // XCH A,@Ri
-            clk++;
-            dat = acc;
-            acc = ram[ram[reg_pnt + 1] & 0x7F];
-            ram[ram[reg_pnt + 1] & 0x7F] = dat;
-            break;
-        case 0x22: // ILL
-            clk++;
-            illegal(op);
-            break;
-        case 0x23: // MOV a,#data
-            clk += 2;
-            acc = ROM(pc++);
-            break;
-
-        case 0x24: // JMP
-            pc = ROM(pc) | 0x100 | A11;
-            clk += 2;
-            break;
-        case 0x25: // EN TCNTI
-            tirq_en = 1;
-            clk++;
-            break;
-        case 0x26: // JNT0
-            illegal(op);
-            break;
-//             clk += 2;
-//             dat = ROM(pc);
-//             if (!get_voice_status())
-//                 pc = (pc & 0xF00) | dat;
-//             else
-//                 pc++;
-            break;
-        case 0x27: // CLR A
-            clk++;
-            acc = 0;
-            break;
-        case 0x28: // XCH A,Rr
-            dat = acc;
-            acc = ram[reg_pnt];
-            ram[reg_pnt] = dat;
-            clk++;
-            break;
-        case 0x29: // XCH A,Rr
-            dat = acc;
-            acc = ram[reg_pnt + 1];
-            ram[reg_pnt + 1] = dat;
-            clk++;
-            break;
-        case 0x2A: // XCH A,Rr
-            dat = acc;
-            acc = ram[reg_pnt + 2];
-            ram[reg_pnt + 2] = dat;
-            clk++;
-            break;
-        case 0x2B: // XCH A,Rr
-            dat = acc;
-            acc = ram[reg_pnt + 3];
-            ram[reg_pnt + 3] = dat;
-            clk++;
-            break;
-        case 0x2C: // XCH A,Rr
-            dat = acc;
-            acc = ram[reg_pnt + 4];
-            ram[reg_pnt + 4] = dat;
-            clk++;
-            break;
-        case 0x2D: // XCH A,Rr
-            dat = acc;
-            acc = ram[reg_pnt + 5];
-            ram[reg_pnt + 5] = dat;
-            clk++;
-            break;
-        case 0x2E: // XCH A,Rr
-            dat = acc;
-            acc = ram[reg_pnt + 6];
-            ram[reg_pnt + 6] = dat;
-            clk++;
-            break;
-        case 0x2F: // XCH A,Rr
-            dat = acc;
-            acc = ram[reg_pnt + 7];
-            ram[reg_pnt + 7] = dat;
-            clk++;
-            break;
-        case 0x30: // XCHD A,@Ri
-            clk++;
-            adr = ram[reg_pnt] & 0x7F;
-            dat = acc & 0x0F;
-            acc = acc & 0xF0;
-            acc = acc | (ram[adr] & 0x0F);
-            ram[adr] &= 0xF0;
-            ram[adr] |= dat;
-            break;
-        case 0x31: // XCHD A,@Ri
-            clk++;
-            adr = ram[reg_pnt + 1] & 0x7F;
-            dat = acc & 0x0F;
-            acc = acc & 0xF0;
-            acc = acc | (ram[adr] & 0x0F);
-            ram[adr] &= 0xF0;
-            ram[adr] |= dat;
-            break;
-        case 0x32: // JBb address
-            clk += 2;
-            dat = ROM(pc);
-            if (acc & 0x02)
-                pc = (pc & 0xF00) | dat;
-            else
-                pc++;
-            break;
-        case 0x33: // ILL
-            clk++;
-            illegal(op);
-            break;
-        case 0x34: // CALL
-            make_psw();
-            adr = ROM(pc) | 0x100 | A11;
-            pc++;
-            clk += 2;
-            push(pc & 0xFF);
-            push(((pc & 0xF00) >> 8) | (psw & 0xF0));
-            pc = adr;
-            break;
-        case 0x35: // DIS TCNTI
-            tirq_en = 0;
-            tirq_pend = 0;
-            clk++;
-            break;
-        case 0x36: // JT0
-            clk += 2;
-//             dat = ROM(pc);
-//             if (get_voice_status())
-//                 pc = (pc & 0xF00) | dat;
-//             else
-//                 pc++;
-            illegal(0);
-            break;
-        case 0x37: // CPL A
-            acc = acc ^ 0xFF;
-            clk++;
-            break;
-        case 0x38: // ILL
-            clk++;
-            illegal(op);
-            break;
-        case 0x39: // OUTL P1,A
-            clk += 2;
-            write_p1(acc);
-            break;
-        case 0x3A: // OUTL P2,A
-            clk += 2;
-            p2 = acc;
-            break;
-        case 0x3B: // ILL
-            clk++;
-            illegal(op);
-            break;
-        case 0x3C: // MOVD P4,A
-            clk += 2;
-            write_PB(0, acc);
-            break;
-        case 0x3D: // MOVD P5,A
-            clk += 2;
-            write_PB(1, acc);
-            break;
-        case 0x3E: // MOVD P6,A
-            clk += 2;
-            write_PB(2, acc);
-            break;
-        case 0x3F: // MOVD P7,A
-            clk += 2;
-            write_PB(3, acc);
-            break;
-        case 0x40: // ORL A,@Ri
-            clk++;
-            acc = acc | ram[ram[reg_pnt] & 0x7F];
-            break;
-        case 0x41: // ORL A,@Ri
-            clk++;
-            acc = acc | ram[ram[reg_pnt + 1] & 0x7F];
-            break;
-        case 0x42: // MOV A,T
-            clk++;
-            acc = timer_counter;
-            break;
-        case 0x43: // ORL A,#data
-            clk += 2;
-            acc = acc | ROM(pc++);
-            break;
-        case 0x44: // JMP
-            pc = ROM(pc) | 0x200 | A11;
-            clk += 2;
-            break;
-        case 0x45: // STRT CNT
-            // printf("START: %d=%d\n",master_clk/22,itimer);
-            count_on = 1;
-            clk++;
-            break;
-        case 0x46: // JNT1
-            clk += 2;
-            dat = ROM(pc);
-            if (!read_t1())
-                pc = (pc & 0xF00) | dat;
-            else
-                pc++;
-            break;
-        case 0x47: // SWAP A
-            clk++;
-            dat = (acc & 0xF0) >> 4;
-            acc = acc << 4;
-            acc = acc | dat;
-            break;
-        case 0x48: // ORL A,Rr
-            clk++;
-            acc = acc | ram[reg_pnt];
-            break;
-        case 0x49: // ORL A,Rr
-            clk++;
-            acc = acc | ram[reg_pnt + 1];
-            break;
-        case 0x4A: // ORL A,Rr
-            clk++;
-            acc = acc | ram[reg_pnt + 2];
-            break;
-        case 0x4B: // ORL A,Rr
-            clk++;
-            acc = acc | ram[reg_pnt + 3];
-            break;
-        case 0x4C: // ORL A,Rr
-            clk++;
-            acc = acc | ram[reg_pnt + 4];
-            break;
-        case 0x4D: // ORL A,Rr
-            clk++;
-            acc = acc | ram[reg_pnt + 5];
-            break;
-        case 0x4E: // ORL A,Rr
-            clk++;
-            acc = acc | ram[reg_pnt + 6];
-            break;
-        case 0x4F: // ORL A,Rr
-            clk++;
-            acc = acc | ram[reg_pnt + 7];
-            break;
-
-        case 0x50: // ANL A,@Ri
-            acc = acc & ram[ram[reg_pnt] & 0x7F];
-            clk++;
-            break;
-        case 0x51: // ANL A,@Ri
-            acc = acc & ram[ram[reg_pnt + 1] & 0x7F];
-            clk++;
-            break;
-        case 0x52: // JBb address
-            clk += 2;
-            dat = ROM(pc);
-            if (acc & 0x04)
-                pc = (pc & 0xF00) | dat;
-            else
-                pc++;
-            break;
-        case 0x53: // ANL A,#data
-            clk += 2;
-            acc = acc & ROM(pc++);
-            break;
-        case 0x54: // CALL
-            make_psw();
-            adr = ROM(pc) | 0x200 | A11;
-            pc++;
-            clk += 2;
-            push(pc & 0xFF);
-            push(((pc & 0xF00) >> 8) | (psw & 0xF0));
-            pc = adr;
-            break;
-        case 0x55: // STRT T
-            timer_on = 1;
-            timer_cycle_accumulator = 0;
-            clk++;
-            break;
-        case 0x56: // JT1
-            clk += 2;
-            dat = ROM(pc);
-            if (read_t1())
-                pc = (pc & 0xF00) | dat;
-            else
-                pc++;
-            break;
-        case 0x57: // DA A
-            clk++;
-            if (((acc & 0x0F) > 0x09) || ac) {
-                if (acc > 0xf9)
-                    carry = 1;
-                acc += 6;
-            }
-            dat = (acc & 0xF0) >> 4;
-            if ((dat > 9) || carry) {
-                dat += 6;
-                carry = 1;
-            }
-            acc = (acc & 0x0F) | (dat << 4);
-            break;
-        case 0x58: // ANL A,Rr
-            clk++;
-            acc = acc & ram[reg_pnt];
-            break;
-        case 0x59: // ANL A,Rr
-            clk++;
-            acc = acc & ram[reg_pnt + 1];
-            break;
-        case 0x5A: // ANL A,Rr
-            clk++;
-            acc = acc & ram[reg_pnt + 2];
-            break;
-        case 0x5B: // ANL A,Rr
-            clk++;
-            acc = acc & ram[reg_pnt + 3];
-            break;
-        case 0x5C: // ANL A,Rr
-            clk++;
-            acc = acc & ram[reg_pnt + 4];
-            break;
-        case 0x5D: // ANL A,Rr
-            clk++;
-            acc = acc & ram[reg_pnt + 5];
-            break;
-        case 0x5E: // ANL A,Rr
-            clk++;
-            acc = acc & ram[reg_pnt + 6];
-            break;
-        case 0x5F: // ANL A,Rr
-            clk++;
-            acc = acc & ram[reg_pnt + 7];
-            break;
-
-        case 0x60: // ADD A,@Ri
-            clk++;
-            carry = ac = 0;
-            dat = ram[ram[reg_pnt] & 0x7F];
-            if (((acc & 0x0f) + (dat & 0x0f)) > 0x0f)
-                ac = 0x40;
-            temp = acc + dat;
-            if (temp > 0xFF)
-                carry = 1;
-            acc = (temp & 0xFF);
-            break;
-        case 0x61: // ADD A,@Ri
-            clk++;
-            carry = ac = 0;
-            dat = ram[ram[reg_pnt + 1] & 0x7F];
-            if (((acc & 0x0f) + (dat & 0x0f)) > 0x0f)
-                ac = 0x40;
-            temp = acc + dat;
-            if (temp > 0xFF)
-                carry = 1;
-            acc = (temp & 0xFF);
-            break;
-        case 0x62: // MOV T,A
-            clk++;
-            timer_counter = acc;
-            break;
-        case 0x63: // ILL
-            clk++;
-            illegal(op);
-            break;
-        case 0x64: // JMP
-            pc = ROM(pc) | 0x300 | A11;
-            clk += 2;
-            break;
-        case 0x65: // STOP TCNT
-            clk++;
-            // printf("STOP %d\n",master_clk/22);
-            count_on = timer_on = 0;
-            break;
-        case 0x66: // ILL
-            clk++;
-            illegal(op);
-            break;
-        case 0x67: // RRC A
-            dat = carry;
-            carry = acc & 0x01;
-            acc = acc >> 1;
-            if (dat)
-                acc = acc | 0x80;
-            else
-                acc = acc & 0x7F;
-            clk++;
-            break;
-        case 0x68: // ADD A,Rr
-            clk++;
-            carry = ac = 0;
-            dat = ram[reg_pnt];
-            if (((acc & 0x0f) + (dat & 0x0f)) > 0x0f)
-                ac = 0x40;
-            temp = acc + dat;
-            if (temp > 0xFF)
-                carry = 1;
-            acc = (temp & 0xFF);
-            break;
-        case 0x69: // ADD A,Rr
-            clk++;
-            carry = ac = 0;
-            dat = ram[reg_pnt + 1];
-            if (((acc & 0x0f) + (dat & 0x0f)) > 0x0f)
-                ac = 0x40;
-            temp = acc + dat;
-            if (temp > 0xFF)
-                carry = 1;
-            acc = (temp & 0xFF);
-            break;
-        case 0x6A: // ADD A,Rr
-            clk++;
-            carry = ac = 0;
-            dat = ram[reg_pnt + 2];
-            if (((acc & 0x0f) + (dat & 0x0f)) > 0x0f)
-                ac = 0x40;
-            temp = acc + dat;
-            if (temp > 0xFF)
-                carry = 1;
-            acc = (temp & 0xFF);
-            break;
-        case 0x6B: // ADD A,Rr
-            clk++;
-            carry = ac = 0;
-            dat = ram[reg_pnt + 3];
-            if (((acc & 0x0f) + (dat & 0x0f)) > 0x0f)
-                ac = 0x40;
-            temp = acc + dat;
-            if (temp > 0xFF)
-                carry = 1;
-            acc = (temp & 0xFF);
-            break;
-        case 0x6C: // ADD A,Rr
-            clk++;
-            carry = ac = 0;
-            dat = ram[reg_pnt + 4];
-            if (((acc & 0x0f) + (dat & 0x0f)) > 0x0f)
-                ac = 0x40;
-            temp = acc + dat;
-            if (temp > 0xFF)
-                carry = 1;
-            acc = (temp & 0xFF);
-            break;
-        case 0x6D: // ADD A,Rr
-            clk++;
-            carry = ac = 0;
-            dat = ram[reg_pnt + 5];
-            if (((acc & 0x0f) + (dat & 0x0f)) > 0x0f)
-                ac = 0x40;
-            temp = acc + dat;
-            if (temp > 0xFF)
-                carry = 1;
-            acc = (temp & 0xFF);
-            break;
-        case 0x6E: // ADD A,Rr
-            clk++;
-            carry = ac = 0;
-            dat = ram[reg_pnt + 6];
-            if (((acc & 0x0f) + (dat & 0x0f)) > 0x0f)
-                ac = 0x40;
-            temp = acc + dat;
-            if (temp > 0xFF)
-                carry = 1;
-            acc = (temp & 0xFF);
-            break;
-        case 0x6F: // ADD A,Rr
-            clk++;
-            carry = ac = 0;
-            dat = ram[reg_pnt + 7];
-            if (((acc & 0x0f) + (dat & 0x0f)) > 0x0f)
-                ac = 0x40;
-            temp = acc + dat;
-            if (temp > 0xFF)
-                carry = 1;
-            acc = (temp & 0xFF);
-            break;
-        case 0x70: // ADDC A,@Ri
-            clk++;
-            ac = 0;
-            dat = ram[ram[reg_pnt] & 0x7F];
-            if (((acc & 0x0f) + (dat & 0x0f) + carry) > 0x0f)
-                ac = 0x40;
-            temp = acc + dat + carry;
-            carry = 0;
-            if (temp > 0xFF)
-                carry = 1;
-            acc = (temp & 0xFF);
-            break;
-        case 0x71: // ADDC A,@Ri
-            clk++;
-            ac = 0;
-            dat = ram[ram[reg_pnt + 1] & 0x7F];
-            if (((acc & 0x0f) + (dat & 0x0f) + carry) > 0x0f)
-                ac = 0x40;
-            temp = acc + dat + carry;
-            carry = 0;
-            if (temp > 0xFF)
-                carry = 1;
-            acc = (temp & 0xFF);
-            break;
-
-        case 0x72: // JBb address
-            clk += 2;
-            dat = ROM(pc);
-            if (acc & 0x08)
-                pc = (pc & 0xF00) | dat;
-            else
-                pc++;
-            break;
-        case 0x73: // ILL
-            clk++;
-            illegal(op);
-            break;
-        case 0x74: // CALL
-            make_psw();
-            adr = ROM(pc) | 0x300 | A11;
-            pc++;
-            clk += 2;
-            push(pc & 0xFF);
-            push(((pc & 0xF00) >> 8) | (psw & 0xF0));
-            pc = adr;
-            break;
-        case 0x75: // EN CLK
-            clk++;
-            undef(op);
-            break;
-        case 0x76: // JF1 address
-            clk += 2;
-            dat = ROM(pc);
-            if (f1)
-                pc = (pc & 0xF00) | dat;
-            else
-                pc++;
-            break;
-        case 0x77: // RR A
-            clk++;
-            dat = acc & 0x01;
-            acc = acc >> 1;
-            if (dat)
-                acc = acc | 0x80;
-            else
-                acc = acc & 0x7f;
-            break;
-
-        case 0x78: // ADDC A,Rr
-            clk++;
-            ac = 0;
-            dat = ram[reg_pnt];
-            if (((acc & 0x0f) + (dat & 0x0f) + carry) > 0x0f)
-                ac = 0x40;
-            temp = acc + dat + carry;
-            carry = 0;
-            if (temp > 0xFF)
-                carry = 1;
-            acc = (temp & 0xFF);
-            break;
-        case 0x79: // ADDC A,Rr
-            clk++;
-            ac = 0;
-            dat = ram[reg_pnt + 1];
-            if (((acc & 0x0f) + (dat & 0x0f) + carry) > 0x0f)
-                ac = 0x40;
-            temp = acc + dat + carry;
-            carry = 0;
-            if (temp > 0xFF)
-                carry = 1;
-            acc = (temp & 0xFF);
-            break;
-        case 0x7A: // ADDC A,Rr
-            clk++;
-            ac = 0;
-            dat = ram[reg_pnt + 2];
-            if (((acc & 0x0f) + (dat & 0x0f) + carry) > 0x0f)
-                ac = 0x40;
-            temp = acc + dat + carry;
-            carry = 0;
-            if (temp > 0xFF)
-                carry = 1;
-            acc = (temp & 0xFF);
-            break;
-        case 0x7B: // ADDC A,Rr
-            clk++;
-            ac = 0;
-            dat = ram[reg_pnt + 3];
-            if (((acc & 0x0f) + (dat & 0x0f) + carry) > 0x0f)
-                ac = 0x40;
-            temp = acc + dat + carry;
-            carry = 0;
-            if (temp > 0xFF)
-                carry = 1;
-            acc = (temp & 0xFF);
-            break;
-        case 0x7C: // ADDC A,Rr
-            clk++;
-            ac = 0;
-            dat = ram[reg_pnt + 4];
-            if (((acc & 0x0f) + (dat & 0x0f) + carry) > 0x0f)
-                ac = 0x40;
-            temp = acc + dat + carry;
-            carry = 0;
-            if (temp > 0xFF)
-                carry = 1;
-            acc = (temp & 0xFF);
-            break;
-        case 0x7D: // ADDC A,Rr
-            clk++;
-            ac = 0;
-            dat = ram[reg_pnt + 5];
-            if (((acc & 0x0f) + (dat & 0x0f) + carry) > 0x0f)
-                ac = 0x40;
-            temp = acc + dat + carry;
-            carry = 0;
-            if (temp > 0xFF)
-                carry = 1;
-            acc = (temp & 0xFF);
-            break;
-        case 0x7E: // ADDC A,Rr
-            clk++;
-            ac = 0;
-            dat = ram[reg_pnt + 6];
-            if (((acc & 0x0f) + (dat & 0x0f) + carry) > 0x0f)
-                ac = 0x40;
-            temp = acc + dat + carry;
-            carry = 0;
-            if (temp > 0xFF)
-                carry = 1;
-            acc = (temp & 0xFF);
-            break;
-        case 0x7F: // ADDC A,Rr
-            clk++;
-            ac = 0;
-            dat = ram[reg_pnt + 7];
-            if (((acc & 0x0f) + (dat & 0x0f) + carry) > 0x0f)
-                ac = 0x40;
-            temp = acc + dat + carry;
-            carry = 0;
-            if (temp > 0xFF)
-                carry = 1;
-            acc = (temp & 0xFF);
-            break;
-
-        case 0x80: // MOVX A,@R0
-            acc = read_external_mem(ram[reg_pnt]);
-            clk += 2;
-            break;
-        case 0x81: // MOVX A,@R1
-            acc = read_external_mem(ram[reg_pnt + 1]);
-            clk += 2;
-            break;
-        case 0x82: // ILL
-            clk++;
-            illegal(op);
-            break;
-        case 0x83: // RET
-            clk += 2;
-            pc = ((pull() & 0x0F) << 8);
-            pc = pc | pull();
-            break;
-        case 0x84: // JMP
-            pc = ROM(pc) | 0x400 | A11;
-            clk += 2;
-            break;
-        case 0x85: // CLR F0
-            clk++;
-            f0 = 0;
-            break;
-        case 0x86: // JNI address
-            clk += 2;
-            dat = ROM(pc);
-            if (int_clk > 0)
-                pc = (pc & 0xF00) | dat;
-            else
-                pc++;
-            break;
-        case 0x87: // ILL
-            illegal(op);
-            clk++;
-            break;
-        case 0x88: // BUS,#data
-            clk += 2;
-            undef(op); // Never happens in 951 code
-            break;
-        case 0x89: // ORL Pp,#data
-            write_p1(p1 | ROM(pc++));
-            clk += 2;
-            break;
-        case 0x8A: // ORL Pp,#data
-            write_p2(p2 | ROM(pc++));
-            clk += 2;
-            break;
-        case 0x8B: // ILL
-            illegal(op);
-            clk++;
-            break;
-        case 0x8C: // ORLD P4,A
-            write_PB(0, read_PB(0) | acc);
-            clk += 2;
-            break;
-        case 0x8D: // ORLD P5,A
-            write_PB(1, read_PB(1) | acc);
-            clk += 2;
-            break;
-        case 0x8E: // ORLD P6,A
-            write_PB(2, read_PB(2) | acc);
-            clk += 2;
-            break;
-        case 0x8F: // ORLD P7,A
-            write_PB(3, read_PB(3) | acc);
-            clk += 2;
-            break;
-        case 0x90: // MOVX @Ri,A
-            ram[reg_pnt] = acc;
-            clk += 2;
-            break;
-        case 0x91: // MOVX @Ri,A
-            ram[reg_pnt + 1] = acc;
-            clk += 2;
-            break;
-        case 0x92: // JBb address
-            clk += 2;
-            dat = ROM(pc);
-            if (acc & 0x10)
-                pc = (pc & 0xF00) | dat;
-            else
-                pc++;
-            break;
-        case 0x93: // RETR
-            // printf("RETR %d\n",master_clk/22);
-            clk += 2;
-            dat = pull();
-            pc = (dat & 0x0F) << 8;
-            carry = (dat & 0x80) >> 7;
-            ac = dat & 0x40;
-            f0 = dat & 0x20;
-            reg_bank = dat & 0x10;
-            if (reg_bank)
-                reg_pnt = 24;
-            else
-                reg_pnt = 0;
-            pc = pc | pull();
-            irq_ex = 0;
-            A11 = A11ff;
-            break;
-        case 0x94: // CALL
-            make_psw();
-            adr = ROM(pc) | 0x400 | A11;
-            pc++;
-            clk += 2;
-            push(pc & 0xFF);
-            push(((pc & 0xF00) >> 8) | (psw & 0xF0));
-            pc = adr;
-            break;
-        case 0x95: // CPL F0
-            f0 = f0 ^ 0x20;
-            clk++;
-            break;
-        case 0x96: // JNZ address
-            clk += 2;
-            dat = ROM(pc);
-            if (acc != 0)
-                pc = (pc & 0xF00) | dat;
-            else
-                pc++;
-            break;
-        case 0x97: // CLR C
-            carry = 0;
-            clk++;
-            break;
-        case 0x98: // ANL BUS,#data
-            clk += 2;
-            undef(op);
-            break;
-        case 0x99: // ANL Pp,#data
-            write_p1(p1 & ROM(pc++));
-            clk += 2;
-            break;
-        case 0x9A: // ANL Pp,#data
-            write_p2(p2 & ROM(pc++));
-            clk += 2;
-            break;
-        case 0x9B: // ILL
-            illegal(op);
-            clk++;
-            break;
-        case 0x9C: // ANLD P4,A
-            write_PB(0, read_PB(0) & acc);
-            clk += 2;
-            break;
-        case 0x9D: // ANLD P5,A
-            write_PB(1, read_PB(1) & acc);
-            clk += 2;
-            break;
-        case 0x9E: // ANLD P6,A
-            write_PB(2, read_PB(2) & acc);
-            clk += 2;
-            break;
-        case 0x9F: // ANLD P7,A
-            write_PB(3, read_PB(3) & acc);
-            clk += 2;
-            break;
-        case 0xA0: // MOV @Ri,A
-            ram[ram[reg_pnt] & 0x7F] = acc;
-            clk++;
-            break;
-        case 0xA1: // MOV @Ri,A
-            ram[ram[reg_pnt + 1] & 0x7F] = acc;
-            clk++;
-            break;
-        case 0xA2: // ILL
-            clk++;
-            illegal(op);
-            break;
-        case 0xA3: // MOVP A,@A
-            acc = ROM((pc & 0xF00) | acc);
-            clk += 2;
-            break;
-        case 0xA4: // JMP
-            pc = ROM(pc) | 0x500 | A11;
-            clk += 2;
-            break;
-        case 0xA5: // CLR F1
-            clk++;
-            f1 = 0;
-            break;
-        case 0xA6: // ILL
-            illegal(op);
-            clk++;
-            break;
-        case 0xA7: // CPL C
-            carry = carry ^ 0x01;
-            clk++;
-            break;
-        case 0xA8: // MOV Rr,A
-            ram[reg_pnt] = acc;
-            clk++;
-            break;
-        case 0xA9: // MOV Rr,A
-            ram[reg_pnt + 1] = acc;
-            clk++;
-            break;
-        case 0xAA: // MOV Rr,A
-            ram[reg_pnt + 2] = acc;
-            clk++;
-            break;
-        case 0xAB: // MOV Rr,A
-            ram[reg_pnt + 3] = acc;
-            clk++;
-            break;
-        case 0xAC: // MOV Rr,A
-            ram[reg_pnt + 4] = acc;
-            clk++;
-            break;
-        case 0xAD: // MOV Rr,A
-            ram[reg_pnt + 5] = acc;
-            clk++;
-            break;
-        case 0xAE: // MOV Rr,A
-            ram[reg_pnt + 6] = acc;
-            clk++;
-            break;
-        case 0xAF: // MOV Rr,A
-            ram[reg_pnt + 7] = acc;
-            clk++;
-            break;
-        case 0xB0: // MOV @Ri,#data
-            ram[ram[reg_pnt] & 0x7F] = ROM(pc++);
-            clk += 2;
-            break;
-        case 0xB1: // MOV @Ri,#data
-            ram[ram[reg_pnt + 1] & 0x7F] = ROM(pc++);
-            clk += 2;
-            break;
-        case 0xB2: // JBb address
-            clk += 2;
-            dat = ROM(pc);
-            if (acc & 0x20)
-                pc = (pc & 0xF00) | dat;
-            else
-                pc++;
-            break;
-        case 0xB3: // JMPP @A
-            adr = (pc & 0xF00) | acc;
-            pc = (pc & 0xF00) | ROM(adr);
-            clk += 2;
-            break;
-        case 0xB4: // CALL
-            make_psw();
-            adr = ROM(pc) | 0x500 | A11;
-            pc++;
-            clk += 2;
-            push(pc & 0xFF);
-            push(((pc & 0xF00) >> 8) | (psw & 0xF0));
-            pc = adr;
-            break;
-        case 0xB5: // CPL F1
-            f1 = f1 ^ 0x01;
-            clk++;
-            break;
-        case 0xB6: // JF0 address
-            clk += 2;
-            dat = ROM(pc);
-            if (f0)
-                pc = (pc & 0xF00) | dat;
-            else
-                pc++;
-            break;
-        case 0xB7: // ILL
-            clk++;
-            illegal(op);
-            break;
-        case 0xB8: // MOV Rr,#data
-            ram[reg_pnt] = ROM(pc++);
-            clk += 2;
-            break;
-        case 0xB9: // MOV Rr,#data
-            ram[reg_pnt + 1] = ROM(pc++);
-            clk += 2;
-            break;
-        case 0xBA: // MOV Rr,#data
-            ram[reg_pnt + 2] = ROM(pc++);
-            clk += 2;
-            break;
-        case 0xBB: // MOV Rr,#data
-            ram[reg_pnt + 3] = ROM(pc++);
-            clk += 2;
-            break;
-        case 0xBC: // MOV Rr,#data
-            ram[reg_pnt + 4] = ROM(pc++);
-            clk += 2;
-            break;
-        case 0xBD: // MOV Rr,#data
-            ram[reg_pnt + 5] = ROM(pc++);
-            clk += 2;
-            break;
-        case 0xBE: // MOV Rr,#data
-            ram[reg_pnt + 6] = ROM(pc++);
-            clk += 2;
-            break;
-        case 0xBF: // MOV Rr,#data
-            ram[reg_pnt + 7] = ROM(pc++);
-            clk += 2;
-            break;
-        case 0xC0: // ILL
-            illegal(op);
-            clk++;
-            break;
-        case 0xC1: // ILL
-            illegal(op);
-            clk++;
-            break;
-        case 0xC2: // ILL
-            illegal(op);
-            clk++;
-            break;
-        case 0xC3: // ILL
-            illegal(op);
-            clk++;
-            break;
-        case 0xC4: // JMP
-            pc = ROM(pc) | 0x600 | A11;
-            clk += 2;
-            break;
-        case 0xC5: // SEL RB0
-            reg_bank = reg_pnt = 0;
-            clk++;
-            break;
-        case 0xC6: // JZ address
-            clk += 2;
-            dat = ROM(pc);
-            if (acc == 0)
-                pc = (pc & 0xF00) | dat;
-            else
-                pc++;
-            break;
-        case 0xC7: // MOV A,PSW
-            clk++;
-            make_psw();
-            acc = psw;
-            break;
-        case 0xC8: // DEC Rr
-            ram[reg_pnt]--;
-            clk++;
-            break;
-        case 0xC9: // DEC Rr
-            ram[reg_pnt + 1]--;
-            clk++;
-            break;
-        case 0xCA: // DEC Rr
-            ram[reg_pnt + 2]--;
-            clk++;
-            break;
-        case 0xCB: // DEC Rr
-            ram[reg_pnt + 3]--;
-            clk++;
-            break;
-        case 0xCC: // DEC Rr
-            ram[reg_pnt + 4]--;
-            clk++;
-            break;
-        case 0xCD: // DEC Rr
-            ram[reg_pnt + 5]--;
-            clk++;
-            break;
-        case 0xCE: // DEC Rr
-            ram[reg_pnt + 6]--;
-            clk++;
-            break;
-        case 0xCF: // DEC Rr
-            ram[reg_pnt + 7]--;
-            clk++;
-            break;
-        case 0xD0: // XRL A,@Ri
-            acc = acc ^ ram[ram[reg_pnt] & 0x7F];
-            clk++;
-            break;
-        case 0xD1: // XRL A,@Ri
-            acc = acc ^ ram[ram[reg_pnt + 1] & 0x7F];
-            clk++;
-            break;
-        case 0xD2: // JBb address
-            clk += 2;
-            dat = ROM(pc);
-            if (acc & 0x40)
-                pc = (pc & 0xF00) | dat;
-            else
-                pc++;
-            break;
-        case 0xD3: // XRL A,#data
-            clk += 2;
-            acc = acc ^ ROM(pc++);
-            break;
-        case 0xD4: // CALL
-            make_psw();
-            adr = ROM(pc) | 0x600 | A11;
-            pc++;
-            clk += 2;
-            push(pc & 0xFF);
-            push(((pc & 0xF00) >> 8) | (psw & 0xF0));
-            pc = adr;
-            break;
-        case 0xD5: // SEL RB1
-            reg_bank = 0x10;
-            reg_pnt = 24;
-            clk++;
-            break;
-        case 0xD6: // ILL
-            illegal(op);
-            clk++;
-            break;
-        case 0xD7: // MOV PSW,A
-            psw = acc;
-            clk++;
-            carry = (psw & 0x80) >> 7;
-            ac = psw & 0x40;
-            f0 = psw & 0x20;
-            reg_bank = psw & 0x10;
-            if (reg_bank)
-                reg_pnt = 24;
-            else
-                reg_pnt = 0;
-            sp = (psw & 0x07) << 1;
-            sp += 8;
-            break;
-        case 0xD8: // XRL A,Rr
-            acc = acc ^ ram[reg_pnt];
-            clk++;
-            break;
-        case 0xD9: // XRL A,Rr
-            acc = acc ^ ram[reg_pnt + 1];
-            clk++;
-            break;
-        case 0xDA: // XRL A,Rr
-            acc = acc ^ ram[reg_pnt + 2];
-            clk++;
-            break;
-        case 0xDB: // XRL A,Rr
-            acc = acc ^ ram[reg_pnt + 3];
-            clk++;
-            break;
-        case 0xDC: // XRL A,Rr
-            acc = acc ^ ram[reg_pnt + 4];
-            clk++;
-            break;
-        case 0xDD: // XRL A,Rr
-            acc = acc ^ ram[reg_pnt + 5];
-            clk++;
-            break;
-        case 0xDE: // XRL A,Rr
-            acc = acc ^ ram[reg_pnt + 6];
-            clk++;
-            break;
-        case 0xDF: // XRL A,Rr
-            acc = acc ^ ram[reg_pnt + 7];
-            clk++;
-            break;
-        case 0xE0: // ILL
-            clk++;
-            illegal(op);
-            break;
-        case 0xE1: // ILL
-            clk++;
-            illegal(op);
-            break;
-        case 0xE2: // ILL
-            clk++;
-            illegal(op);
-            break;
-        case 0xE3: // MOVP3 A,@A
-
-            adr = 0x300 | acc;
-            acc = ROM(adr);
-            clk += 2;
-            break;
-        case 0xE4: // JMP
-            pc = ROM(pc) | 0x700 | A11;
-            clk += 2;
-            break;
-        case 0xE5: // SEL MB0
-            A11 = 0;
-            A11ff = 0;
-            clk++;
-            break;
-        case 0xE6: // JNC address
-            clk += 2;
-            dat = ROM(pc);
-            if (!carry)
-                pc = (pc & 0xF00) | dat;
-            else
-                pc++;
-            break;
-        case 0xE7: // RL A
-            clk++;
-            dat = acc & 0x80;
-            acc = acc << 1;
-            if (dat)
-                acc = acc | 0x01;
-            else
-                acc = acc & 0xFE;
-            break;
-        case 0xE8: // DJNZ Rr,address
-            clk += 2;
-            ram[reg_pnt]--;
-            dat = ROM(pc);
-            if (ram[reg_pnt] != 0) {
-                pc = pc & 0xF00;
-                pc = pc | dat;
-            } else
-                pc++;
-            break;
-        case 0xE9: // DJNZ Rr,address
-            clk += 2;
-            ram[reg_pnt + 1]--;
-            dat = ROM(pc);
-            if (ram[reg_pnt + 1] != 0) {
-                pc = pc & 0xF00;
-                pc = pc | dat;
-            } else
-                pc++;
-            break;
-        case 0xEA: // DJNZ Rr,address
-            clk += 2;
-            ram[reg_pnt + 2]--;
-            dat = ROM(pc);
-            if (ram[reg_pnt + 2] != 0) {
-                pc = pc & 0xF00;
-                pc = pc | dat;
-            } else
-                pc++;
-            break;
-        case 0xEB: // DJNZ Rr,address
-            clk += 2;
-            ram[reg_pnt + 3]--;
-            dat = ROM(pc);
-            if (ram[reg_pnt + 3] != 0) {
-                pc = pc & 0xF00;
-                pc = pc | dat;
-            } else
-                pc++;
-            break;
-        case 0xEC: // DJNZ Rr,address
-            clk += 2;
-            ram[reg_pnt + 4]--;
-            dat = ROM(pc);
-            if (ram[reg_pnt + 4] != 0) {
-                pc = pc & 0xF00;
-                pc = pc | dat;
-            } else
-                pc++;
-            break;
-        case 0xED: // DJNZ Rr,address
-            clk += 2;
-            ram[reg_pnt + 5]--;
-            dat = ROM(pc);
-            if (ram[reg_pnt + 5] != 0) {
-                pc = pc & 0xF00;
-                pc = pc | dat;
-            } else
-                pc++;
-            break;
-        case 0xEE: // DJNZ Rr,address
-            clk += 2;
-            ram[reg_pnt + 6]--;
-            dat = ROM(pc);
-            if (ram[reg_pnt + 6] != 0) {
-                pc = pc & 0xF00;
-                pc = pc | dat;
-            } else
-                pc++;
-            break;
-        case 0xEF: // DJNZ Rr,address
-            clk += 2;
-            ram[reg_pnt + 7]--;
-            dat = ROM(pc);
-            if (ram[reg_pnt + 7] != 0) {
-                pc = pc & 0xF00;
-                pc = pc | dat;
-            } else
-                pc++;
-            break;
-        case 0xF0: // MOV A,@R0
-            clk++;
-            acc = ram[ram[reg_pnt] & 0x7F];
-            break;
-        case 0xF1: // MOV A,@R1
-            clk++;
-            acc = ram[ram[reg_pnt + 1] & 0x7F];
-            break;
-        case 0xF2: // JBb address
-            clk += 2;
-            dat = ROM(pc);
-            if (acc & 0x80)
-                pc = (pc & 0xF00) | dat;
-            else
-                pc++;
-            break;
-        case 0xF3: // ILL
-            illegal(op);
-            clk++;
-            break;
-        case 0xF4: // CALL
-            clk += 2;
-            make_psw();
-            adr = ROM(pc) | 0x700 | A11;
-            pc++;
-            push(pc & 0xFF);
-            push(((pc & 0xF00) >> 8) | (psw & 0xF0));
-            pc = adr;
-            break;
-        case 0xF5: // SEL MB1
-            if (irq_ex) {
-                A11ff = 0x800;
-            } else {
-                A11 = 0x800;
-                A11ff = 0x800;
-            }
-            clk++;
-            break;
-        case 0xF6: // JC address
-            clk += 2;
-            dat = ROM(pc);
-            if (carry)
-                pc = (pc & 0xF00) | dat;
-            else
-                pc++;
-            break;
-        case 0xF7: // RLC A
-            dat = carry;
-            carry = (acc & 0x80) >> 7;
-            acc = acc << 1;
-            if (dat)
-                acc = acc | 0x01;
-            else
-                acc = acc & 0xFE;
-            clk++;
-            break;
-        case 0xF8: // MOV A,Rr
-            clk++;
-            acc = ram[reg_pnt];
-            break;
-        case 0xF9: // MOV A,Rr
-            clk++;
-            acc = ram[reg_pnt + 1];
-            break;
-        case 0xFA: // MOV A,Rr
-            clk++;
-            acc = ram[reg_pnt + 2];
-            break;
-        case 0xFB: // MOV A,Rr
-            clk++;
-            acc = ram[reg_pnt + 3];
-            break;
-        case 0xFC: // MOV A,Rr
-            clk++;
-            acc = ram[reg_pnt + 4];
-            break;
-        case 0xFD: // MOV A,Rr
-            clk++;
-            acc = ram[reg_pnt + 5];
-            break;
-        case 0xFE: // MOV A,Rr
-            clk++;
-            acc = ram[reg_pnt + 6];
-            break;
-        case 0xFF: // MOV A,Rr
-            clk++;
-            acc = ram[reg_pnt + 7];
-            break;
-        }
-
-        master_clk += clk;
-
-        // flag for JNI
-        if (int_clk > clk)
-            int_clk -= clk;
-        else
-            int_clk = 0;
-
-        // pending IRQs
-        if (xirq_pend)
-            ext_IRQ();
-        if (tirq_pend)
-            tim_IRQ();
-
-        if (timer_on) {
-            timer_cycle_accumulator += clk;
-            if (timer_cycle_accumulator > 31) {
-                timer_cycle_accumulator -= 31;
-                timer_counter++;
-                if (timer_counter == 0) {
-                    t_flag = 1;
-                    tim_IRQ();
-                }
-            }
-        }
-    }
-
-    return master_clk - target_master_clk + num_cycles;
 }

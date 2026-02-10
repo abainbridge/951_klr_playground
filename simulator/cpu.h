@@ -1,54 +1,61 @@
+// license:BSD-3-Clause
+// copyright-holders:Andrew Bainbridge, Dan Boris, Mirko Buffoni, Aaron Giles, 
+// Couriersud
+// Based on the original work Copyright Mirko Buffoni, Dan Boris
+
+// Intel MCS-48 Emulator. Specifically the 8048-like processor in the Porsche 
+// 944 Turbo KLR Module.
+
 #pragma once
 
 #include "types.h"
 
 
 enum { CPU_CLOCK_RATE_HZ = 733333 };
-static double CPU_CLOCK_PERIOD = 1.0 / CPU_CLOCK_RATE_HZ;
+#define CPU_CLOCK_PERIOD (1.0 / CPU_CLOCK_RATE_HZ)
 
 
-void cpu_reset(void);
-void cpu_draw_state(int x, int y);
-void cpu_exec(unsigned num_cycles);
+typedef struct {
+    u16 prev_pc;
+    u16 pc;               // Program Counter
 
-extern Byte acc;   // Accumulator
-extern ADDRESS pc; // Program counter
+    u8 acc;               // Accumulator
+    u8 *reg_ptr;          // Pointer to r0-r7
+    u8 psw;               // Program Status Word
+    bool f1;              // F1 flag (F0 is in PSW)
+    u16 a11;              // 11th address bit, either 0x000 or 0x800
+    u8 p1;                // Latched port 1
+    u8 p2;                // Latched port 2
+    u8 timer_counter;     // Is incremented every 32 cycles. Generates interrupt when overflows.
+    u8 prescaler;         // 5-bit timer prescaler
+    u8 t1_history;        // 8-bit history of the T1 input
 
-extern Byte timer_counter;   // Internal timer
-extern Byte reg_pnt;  // pointer to register bank
-extern Byte timer_on; // 0=timer off/1=timer on
-extern Byte count_on; // 0=count off/1=count on
-extern Byte psw;      // Processor status word
-extern Byte sp;       // Stack pointer (part of psw)
+    bool irq_state;       // true if the IRQ line is active
+    bool irq_polled;      // true if last instruction was JNI (and not taken)
+    bool irq_in_progress; // true if an IRQ is in progress
+    bool timer_overflow;  // true on a timer overflow; cleared by taking interrupt
+    bool timer_flag;      // true on a timer overflow; cleared on JTF
+    bool tirq_enabled;    // true if the timer IRQ is enabled
+    bool xirq_enabled;    // true if the external IRQ is enabled
+    u8 timecount_enabled; // bitmask of timer/counter enabled
 
-extern Byte p1;        // I/O port 1
-extern Byte p2;        // I/O port 2
-extern Byte xirq_pend; // external IRQ pending
-extern Byte tirq_pend; // timer IRQ pending
-extern Byte t_flag;    // Timer flag
+    int icount;           // Number of cycles to execute. Can be -1 when cpu_execute() returns.
+    int master_clk;       // Total number of cycles executed.
 
-extern ADDRESS A11;  // PC bit 11
-extern ADDRESS A11ff;
-extern Byte reg_bank;// Register Bank (part of psw)
-extern Byte f0;      // Flag Bit (part of psw)
-extern Byte f1;      // Flag Bit 1
-extern Byte ac;      // Aux Carry (part of psw)
-extern Byte carry;      // Carry flag (part of psw)
-extern Byte xirq_en; // external IRQ's enabled
-extern Byte tirq_en; // Timer IRQ enabled
-extern Byte irq_ex;  // IRQ executing
+    u8 rom[4096];
+    u8 ram[128];
+} cpu_t;
 
-extern int timer_cycle_accumulator;
-extern int master_clk;
-
-extern Byte ram[128];
-extern Byte rom[4096];
 
 // Implement these call-back functions to handle access by the CPU core into the
 // rest of the simulated system.
-Byte read_PB(Byte p);
-Byte read_t1(void);
-void write_p1(Byte val);
-void write_p2(Byte val);
-void write_PB(Byte p, Byte val);
-Byte read_external_mem(Byte addr);
+u8 cpu_t0_read(void);
+u8 cpu_t1_read(void);
+void cpu_port1_write(cpu_t *cpu, u8 val);
+void cpu_port2_write(cpu_t *cpu, u8 val);
+u8 cpu_external_mem_read(cpu_t *cpu, u8 addr);
+
+cpu_t *cpu_get(void);
+void cpu_reset();
+void cpu_execute(int num_cycles);
+void cpu_draw_state(int x, int y);

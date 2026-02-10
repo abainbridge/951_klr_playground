@@ -24,64 +24,56 @@ VirtualCar g_virtual_car;
 static bool g_t1;
 
 
-Byte read_PB(Byte p) {
+u8 cpu_t0_read(void) {
     return 0;
 }
 
-Byte read_t1(void) {
+u8 cpu_t1_read(void) {
     return g_t1;
 }
 
-static Byte get_graph_val_from_bit_n(Byte val, int n) {
+static u8 get_graph_val_from_bit_n(u8 val, int n) {
     val >>= n;
     return (val & 1) * 255;
 }
 
-void write_p1(Byte val) {
-    Byte changes = p1 ^ val;
+void cpu_port1_write(cpu_t *cpu, u8 val) {
+    u8 changes = cpu->p1 ^ val;
 
     if ((changes & 0x08) && (val & 0x08)) {
         // ADC ALE
         g_adc_latched_address = val & 7;
-        g_adc_latch_cycle = master_clk;
+        g_adc_latch_cycle = cpu->master_clk;
     }
     if (changes & 0x10) {
         // Cycling valve changed
-        graph_add_point(FROM_KLR_CYCLING_VALVE_PWM, master_clk, get_graph_val_from_bit_n(p1, 4));
-        graph_add_point(FROM_KLR_CYCLING_VALVE_PWM, master_clk, get_graph_val_from_bit_n(val, 4));
+        graph_add_point(FROM_KLR_CYCLING_VALVE_PWM, cpu->master_clk, get_graph_val_from_bit_n(cpu->p1, 4));
+        graph_add_point(FROM_KLR_CYCLING_VALVE_PWM, cpu->master_clk, get_graph_val_from_bit_n(val, 4));
     }
     if (changes & 0x20) {
         // Full load signal changed
-        graph_add_point(FROM_KLR_FULL_LOAD_SIGNAL, master_clk, get_graph_val_from_bit_n(p1, 5));
-        graph_add_point(FROM_KLR_FULL_LOAD_SIGNAL, master_clk, get_graph_val_from_bit_n(val, 5));
+        graph_add_point(FROM_KLR_FULL_LOAD_SIGNAL, cpu->master_clk, get_graph_val_from_bit_n(cpu->p1, 5));
+        graph_add_point(FROM_KLR_FULL_LOAD_SIGNAL, cpu->master_clk, get_graph_val_from_bit_n(val, 5));
     }
-
-    p1 = val;
 }
 
-void write_p2(Byte val) {
-    Byte changes = p2 ^ val;
+void cpu_port2_write(cpu_t *cpu, u8 val) {
+    u8 changes = cpu->p2 ^ val;
 
     if (changes & 0x10) {
         // Blink code changed
-        graph_add_point(FROM_KLR_BLINK_CODE, master_clk, get_graph_val_from_bit_n(p2, 4));
-        graph_add_point(FROM_KLR_BLINK_CODE, master_clk, get_graph_val_from_bit_n(val, 4));
+        graph_add_point(FROM_KLR_BLINK_CODE, cpu->master_clk, get_graph_val_from_bit_n(cpu->p2, 4));
+        graph_add_point(FROM_KLR_BLINK_CODE, cpu->master_clk, get_graph_val_from_bit_n(val, 4));
     }
-
-    p2 = val;
 }
 
-void write_PB(Byte p, Byte val) {
-    p = p;
-}
-
-Byte read_external_mem(Byte addr) {
-    if (pc == 0x44d)
-        master_clk = master_clk;
+u8 cpu_external_mem_read(cpu_t *cpu, u8 addr) {
+    if (cpu->pc == 0x44d)
+        cpu->master_clk = cpu->master_clk;
 
     double conversion_time = 14e-6; // In seconds. From datasheet.
     unsigned data_ready_time = g_adc_latch_cycle + CPU_CLOCK_RATE_HZ * conversion_time;
-    if ((unsigned)master_clk < data_ready_time)
+    if ((unsigned)cpu->master_clk < data_ready_time)
         data_ready_time = data_ready_time; // Error. Output accessed before it was ready.
 
     switch (g_adc_latched_address) {
@@ -122,6 +114,8 @@ void vc_init() {
     DrawTextLeft(g_defaultFont, g_colourBlack, g_window->bmp, x, y, msg, ##__VA_ARGS__)
 
 void vc_draw_state(int _x, int _y) {
+    cpu_t *cpu = cpu_get();
+
     int x = _x + g_defaultFont->maxCharWidth;
     int y = _y + g_defaultFont->charHeight / 2;
     DRAW_TEXT(x, y, "Virtual Car Simulation Parameters");
@@ -137,30 +131,33 @@ void vc_draw_state(int _x, int _y) {
     y += g_defaultFont->charHeight * 1.2;
     x += DRAW_TEXT(x, y, "Manifold pressure:%.2f bar  ", g_virtual_car.manifold_pressure);
     x += DRAW_TEXT(x, y, "Engine power:%.0f BHP  ", g_virtual_car.engine_power);
-    x += DRAW_TEXT(x, y, "RealTime:%4.1fms  ", master_clk * CPU_CLOCK_PERIOD * 1e3);
+    x += DRAW_TEXT(x, y, "RealTime:%4.1fms  ", cpu->master_clk * CPU_CLOCK_PERIOD * 1e3);
     y += g_defaultFont->charHeight * 1.7;
     HLine(g_window->bmp, 0, y, g_window->bmp->width, g_colourBlack);
 }
 
 void signal_reset() {
+    cpu_t *cpu = cpu_get();
     cpu_reset();
-    graph_add_point(TO_KLR_RESET, master_clk, 0);
-    graph_add_point(TO_KLR_RESET, master_clk, 255);
-    graph_add_point(TO_KLR_RESET, master_clk + 1, 255);
-    graph_add_point(TO_KLR_RESET, master_clk + 1, 0);
+    graph_add_point(TO_KLR_RESET, cpu->master_clk, 0);
+    graph_add_point(TO_KLR_RESET, cpu->master_clk, 255);
+    graph_add_point(TO_KLR_RESET, cpu->master_clk + 1, 255);
+    graph_add_point(TO_KLR_RESET, cpu->master_clk + 1, 0);
 }
 
 void signal_dwell_start() {
+    cpu_t *cpu = cpu_get();
     g_t1 = 1;
-    graph_add_point(TO_KLR_IGNTION, master_clk, 0);
-    graph_add_point(TO_KLR_IGNTION, master_clk, 255);
+    graph_add_point(TO_KLR_IGNTION, cpu->master_clk, 0);
+    graph_add_point(TO_KLR_IGNTION, cpu->master_clk, 255);
 }
 
 void signal_dwell_end() {
+    cpu_t *cpu = cpu_get();
     g_t1 = 0;
-    xirq_pend = 1;
-    graph_add_point(TO_KLR_IGNTION, master_clk, 255);
-    graph_add_point(TO_KLR_IGNTION, master_clk, 0);
+    cpu->irq_state = 1; // Dodgy. There should be an interface function in the cpu module that we can call to do this.
+    graph_add_point(TO_KLR_IGNTION, cpu->master_clk, 255);
+    graph_add_point(TO_KLR_IGNTION, cpu->master_clk, 0);
 }
 
 void vc_advance(double advance_period_seconds) {
@@ -243,7 +240,7 @@ void vc_advance(double advance_period_seconds) {
             double degrees_until_reset = -80.0 - car->crank_angle;
             int cycles_until_reset = CPU_CLOCK_RATE_HZ * degrees_until_reset /
                 engine_speed_degrees_per_second;
-            cpu_exec(cycles_until_reset);
+            cpu_execute(cycles_until_reset);
             cycle += cycles_until_reset;
             car->crank_angle = -80.0;
             signal_reset();
@@ -253,7 +250,7 @@ void vc_advance(double advance_period_seconds) {
             double degrees_until_dwell_start = -33.0 - car->crank_angle;
             int cycles_until_dwell_start = CPU_CLOCK_RATE_HZ * degrees_until_dwell_start /
                 engine_speed_degrees_per_second;
-            cpu_exec(cycles_until_dwell_start);
+            cpu_execute(cycles_until_dwell_start);
             cycle += cycles_until_dwell_start;
             car->crank_angle = -33.0;
             signal_dwell_start();
@@ -263,7 +260,7 @@ void vc_advance(double advance_period_seconds) {
             double degrees_until_dwell_end = -30.0 - car->crank_angle;
             int cycles_until_dwell_end = CPU_CLOCK_RATE_HZ * degrees_until_dwell_end /
                 engine_speed_degrees_per_second;
-            cpu_exec(cycles_until_dwell_end);
+            cpu_execute(cycles_until_dwell_end);
             cycle += cycles_until_dwell_end;
             car->crank_angle = -30.0;
             signal_dwell_end();
@@ -271,13 +268,13 @@ void vc_advance(double advance_period_seconds) {
         else if (car->crank_angle < 90.0 && target_crank_angle > 90.0) {
             double degrees_until_90 = 90.0 - car->crank_angle;
             int cycles_until_80 = CPU_CLOCK_RATE_HZ * degrees_until_90 / engine_speed_degrees_per_second;
-            cpu_exec(cycles_until_80);
+            cpu_execute(cycles_until_80);
             cycle += cycles_until_80;
             car->crank_angle = -90.0;
             target_crank_angle -= degrees_until_90 + 180.0;
         }
         else {
-            cpu_exec(advance_period_cycles);
+            cpu_execute(advance_period_cycles);
             car->crank_angle = target_crank_angle;
             break;
         }
