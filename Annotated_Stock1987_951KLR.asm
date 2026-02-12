@@ -1,15 +1,79 @@
-;; reset
+// TODO:
+// - Is the trigger signal from the DME on pin 4 (pin 24 of the KLR connector)
+
+// Microcontroller specs:
+// 128 bytes of RAM
+// 4096 bytes of external EPROM (used for program and data)
+// 11 MHz XTAL. There are 15 ticks of this clock per CPU "cycle". Most instructions take 1 "cycle", some take 2.
+// So the CPU effectively runs at 733 kHz.
+
+// The way we configure the timer causes an interrupt every 87us if about 1500 RPM or 170us if above 750 RPM.
+
+// Inputs:
+// Reset (pin 4) - Trigger signal from DME (80 degrees before TDC)
+// Ext int (pin 6) - Ignition signal from DME
+// T1 (pin 39) - Ignition signal from DME
+
+// At 850 RPM
+// 
+// Time (ms)      0                35               70       
+// 
+// Reset     _____|________________|________________|________________ One spike per cylinder fire.
+// (trigger)                                                          Two per crank revolution.
+//                     ___              ___              ___  
+// T1        _________|   |____________|   |____________|   |________ 
+// (ignition)
+
+// Register bank 0 - Used for interrupt context
+// r0 - Holds 24h at start of interrupt. 24h is scratch space to store the normal-context's accumulator
+// r2 - A count of number of times timer interrupt fired.
+// r3 - used as an input to the 8-bit multiply function
+// r5 - Decremented every interrupt. When reaches 0
+// r6 - engine speed represented as the number of timer interrupts since the last reset. Actually
+//      it is a count that is initialized to 0 at reset and counts _down_ each interrupt.
+// r7 - the current timer period. Actually it is the value the timer/event-counter register
+//      is re-initialized to every time the timer interrupt happens. r7 is initialized to 0xfc
+//      in the boot code, and then left/right shifted occasionally depending on the RPM. In practice
+//      it has a value of 0xfe when the RPM is above 1500 RPM and 0xfc otherwise.
+
+// Register bank 1 - Used for normal context
+
+// Global variables
+// 24h - engine_speed???
+// 2fh - raw knock sensor reading?
+// 33h - blink code
+// 38h - scratch space for interrupt routines to stash the non-interrupt context's accumulator
+// 39h - +V value read by the ADC
+// 3ah - throttle position in degrees
+// 3ch - raw throttle position sensor
+// 44h - RPM range. 64 means 0-1863 RPM, 0 means over 6386 RPM.
+// 45h - current maximum knock threshold (looked-up from map based on current RPM. But map is all the same value of 10)
+// 46h - integrated knock value read by ADC
+// 7ah - current knock threshold value for the cylinder that fired in the previous cycle
+
+// Reset behaviour (section 2.1.12 of the MCS-48 manual)
+// - PC set to zero
+// - Stack Pointer set to zero
+// - Reg bank 0 and mem bank 0 selected.
+// - Interrupts are disabled
+// - All port latches initialized to 1
+// - Stops time (but does NOT zero the timer counter).
+// - Overflow flag is reset
+// - Clears F0, F1 and the Timer flag
+
+// Start the timer. This resets the internal 32-cycle counter. As a result, the
+// timer will tick in 32 cycles time.
 0x00 strt t
 0x01 jmp  $0077
 
-;; ext int routine
+// ext int routine
 0x03 sel  rb0
 0x04 dis  i
 0x05 jmp  $030E
 
-;; timer int routine
+// timer int routine
 0x07 sel  rb0
-0x08 mov  @r0,a
+0x08 mov  @r0,a   // Store the accumulator. First time in r0=0x38. Next time it is 0x7c. Weird.
 0x09 mov  a,r7
 0x0a mov  t,a
 0x0b djnz r6,$0010
@@ -18,11 +82,13 @@
 0x0f stop tcnt
 0x10 jnt1 $001A
 0x12 en   i
-0x13 djnz r3,$001A
+0x13 djnz r3,$001A // r3 was zeroed at end of startup code.
 0x15 inc  r3
-0x16 anl  p2,#$BF
-0x18 orl  p2,#$80
-0x1a djnz r2,$0036
+0x16 anl  p2,#$BF // Clear bit 6 of port 2. (Ignition output inversed)
+0x18 orl  p2,#$80 // Set bit 7 of port 2. (Ignition output)
+
+0x1a djnz r2,$0036// r2 was set to 0xfc early in the startup code, but then zeroed near the end.
+
 0x1c mov  r0,#$26
 0x1e mov  a,@r0
 0x1f inc  a
@@ -42,6 +108,8 @@
 0x32 mov  r0,#$38
 0x34 jmp  $005E
 0x36 djnz r5,$0063
+
+// Only execute this section every 60ms (?)
 0x38 mov  r0,#$40
 0x3a mov  a,r7
 0x3b inc  @r0
@@ -55,7 +123,7 @@
 0x46 anl  p1,#$EF
 0x48 jmp  $0054
 0x4a dec  r0
-0x4b mov  @r0,#$FF
+0x4b mov  @r0,#$FF // mem[0x40] = 0xff
 0x4d inc  r0
 0x4e mov  a,@r0
 0x4f cpl  a
@@ -73,6 +141,7 @@
 0x60 inc  r4
 0x61 mov  a,@r0
 0x62 retr
+
 0x63 djnz r4,$0061
 0x65 orl  p1,#$80
 0x67 mov  r0,#$2C
@@ -82,47 +151,66 @@
 0x6d call $040B
 0x6f mov  r0,#$38
 0x71 mov  a,@r0
-0x72 retr
-;; END of timer int routine
+0x72 retr         // Has side-effect of restoring the previous register bank setting
+// END of timer int routine
 
 
-;; Reset/Trigger routine
-0x73 anl  p2,#$47
+// Reset/Trigger routine
+0x73 anl  p2,#$47 // Clear ignition output, knock sensor integrator reset and LED
 0x75 jmp  $007B
-0x77 jnt1 $0073
-0x79 anl  p2,#$87
+
+// reg bank = 0
+entry_point:
+0x77 jnt1 $0073   // Jump if ignition input is low
+0x79 anl  p2,#$87 // Clear ignition output inversed, knock sensor integrator reset and LED
+
 0x7b mov  r0,#$25
 0x7d mov  r1,#$21
 0x7f mov  a,@r1
-0x80 mov  @r0,a
-0x81 inc  r0
-0x82 dec  r1
+0x80 mov  @r0,a   // _25 = _21
+
+// 26h - Copy of 20h before trigger processed
+// 20h - Copy of 28h before trigger processed
+// 21h - Copy of 29h before trigger processed
+
+// _26 = _20
+0x81 inc  r0      // r0 = 26
+0x82 dec  r1      // r1 = 20
 0x83 mov  a,@r1
 0x84 mov  @r0,a
+
+// _20 = _28
 0x85 mov  r0,#$28
 0x87 mov  a,@r0
 0x88 mov  @r1,a
-0x89 inc  r0
-0x8a inc  r1
+
+// _21 = _29
+0x89 inc  r0      // r0 = 29
+0x8a inc  r1      // r1 = 21
 0x8b mov  a,@r0
 0x8c mov  @r1,a
+
+// timer counter = 0xfc. The timer hardware will increment "t" every 32 cycles.
+// When it overflows back to 0, the timer interrupt will fire.
+// 38h is space for the accumulator to be stored by the interrupt routine
 0x8d mov  r0,#$38
 0x8f mov  a,#$FC
 0x91 mov  t,a
-0x92 mov  r2,a
-0x93 inc  r5
-0x94 mov  r1,#$40
+0x92 mov  r2,a    // r2 = 0xfc
+
+0x93 inc  r5      // r5 = 1 on boot
+0x94 mov  r1,#$40 // I wonder what 0x40 points to. Obviously zero on boot.
 0x96 mov  a,@r1
-0x97 djnz r5,$009C
-0x99 inc  r5
+0x97 djnz r5,$09C // r5 is zero on boot, so no jump
+0x99 inc  r5      // put r5 back to 1 on boot
 0x9a swap a
 0x9b xchd a,@r1
 0x9c jb2  $00A0
 0x9e anl  p1,#$EF
-0xa0 call $0325
+0xa0 call $0325   // does r4 = mem[24h]
 0xa2 en   tcnti
 0xa3 mov  r1,#$3C
-0xa5 movx a,@r1
+0xa5 movx a,@r1   // On first execute of this instruction, ADC channel 7 (TPS) is selected
 0xa6 xch  a,@r1
 0xa7 inc  r1
 0xa8 mov  @r1,a
@@ -132,10 +220,10 @@
 0xad mov  r1,#$3A
 0xaf add  a,@r1
 0xb0 jc   $00B4
-0xb2 anl  p1,#$DF;11011111
+0xb2 anl  p1,#$DF // 1101_1111 - Clear full load signal to DME
 0xb4 mov  r1,#$24
 0xb6 clr  a
-0xb7 xch  a,r6
+0xb7 xch  a,r6    // Put r6 (num timer firings) in accumulator and clear r6.
 0xb8 cpl  a
 0xb9 mov  @r1,a
 0xba mov  a,@r1
@@ -146,22 +234,28 @@
 0xc1 rlc  a
 0xc2 mov  r7,a
 0xc3 inc  r1
+
+// r1 == 25
+// Say _25 was 100
 0xc4 mov  a,@r1
-0xc5 clr  c
-0xc6 rrc  a
-0xc7 mov  @r1,a
-0xc8 dec  r1
-0xc9 mov  a,r1
-0xca cpl  a
+0xc5 clr  c       // Clear carry bit in PSW
+0xc6 rrc  a       // Rotate accumulator right. Top bit gets zero from carry bit.
+0xc7 mov  @r1,a   // _25 is now 50
+0xc8 dec  r1      // r1 := 24h
+0xc9 mov  a,r1    // a := 24h
+0xca cpl  a       // a := dbh == 0b1101_1011
+
+// We get to about here before the timer interrupt fires for the first time.
 0xcb jb4  $00C4
+
 0xcd call $0325
 0xcf mov  r1,#$24
 0xd1 mov  a,@r1
 0xd2 add  a,#$92
 0xd4 cpl  f1
-0xd5 jc   $00EF
+0xd5 jc   $00EF   // If _24 + 92h > 256 jump 0ef
 0xd7 add  a,#$41
-0xd9 jc   $00DC
+0xd9 jc   $00DC   // If _24 + d3h > 256 jump 0dc
 0xdb cpl  f1
 0xdc mov  a,r7
 0xdd jb1  $00EF
@@ -170,6 +264,8 @@
 0xe1 rrc  a
 0xe2 mov  r7,a
 0xe3 inc  r1
+
+// r1 == 25 again, same loop logic as above
 0xe4 mov  a,@r1
 0xe5 clr  c
 0xe6 rlc  a
@@ -178,6 +274,7 @@
 0xe9 mov  a,r1
 0xea cpl  a
 0xeb jb4  $00E4
+
 0xed call $0325
 0xef mov  r1,#$31
 0xf1 inc  @r1
@@ -194,15 +291,20 @@
 0xfd nop
 0xfe movp a,@a
 0xff ret
+
+// Increment _2c until the bottom 3 bits are zero
 0x100 nop
-0x101 inc  @r1
+0x101 inc  @r1       // r1 = 0x2c because we only get here after looping
+
 0x102 mov  r1,#$2C
 0x104 mov  a,@r1
 0x105 anl  a,#$7
 0x107 jnz  $0101
+
 0x109 mov  r1,#$33
 0x10b mov  a,@r1
 0x10c jz   $0137
+
 0x10e mov  a,r7
 0x10f jb1  $0135
 0x111 mov  r1,#$2C
@@ -250,21 +352,25 @@
 0x14f jb2  $01B1
 0x151 jb3  $016A
 0x153 orl  p2,#$10
+
 0x155 mov  r1,#$7F
 0x157 mov  @r1,#$2F
 0x159 dec  r1
-0x15a mov  @r1,#$46
+0x15a mov  @r1,#$46  // mem[0x7e] = 0x46
 0x15c dec  r1
 0x15d mov  @r1,#$31
 0x15f dec  r1
-0x160 mov  @r1,#$34
+0x160 mov  @r1,#$34  // mem[0x7c] = 0x34
+
+// Zero memory from 0x28 to 0x7c
 0x162 dec  r1
 0x163 mov  @r1,#$0
 0x165 mov  a,r1
 0x166 xrl  a,#$28
 0x168 jnz  $0162
+
 0x16a mov  a,#$FF
-0x16c orl  p1,#$10
+0x16c orl  p1,#$10   // Cycling valve PWM enable
 0x16e mov  r1,#$2E
 0x170 mov  @r1,a
 0x171 mov  r1,#$30
@@ -275,15 +381,15 @@
 0x179 mov  @r1,a
 0x17a inc  r1
 0x17b mov  @r1,a
-0x17c mov  r1,#$39;TPS power
-0x17e mov  @r1,#$C8;39h <- 200
-0x180 mov  a,#$77;119
+0x17c mov  r1,#$39 // TPS supply voltage
+0x17e mov  @r1,#$C8 // 39h <- 200
+0x180 mov  a,#$77 // 119
 0x182 mov  r1,#$3B
-0x184 mov  @r1,a;3B <- 119
+0x184 mov  @r1,a // 3B <- 119
 0x185 mov  r1,#$3C
-0x187 mov  @r1,a;3C <- 119
+0x187 mov  @r1,a // 3C <- 119
 0x188 inc  r1
-0x189 mov  @r1,a;3D <- 119
+0x189 mov  @r1,a // 3D <- 119
 0x18a inc  r1
 0x18b mov  @r1,a
 0x18c mov  r1,#$2C
@@ -300,17 +406,20 @@
 0x19f mov  r2,a
 0x1a0 mov  r3,a
 0x1a1 dis  i
-0x1a2 sel  rb1
+0x1a2 sel  rb1       // I guess this means we've finished setting things up for the interrupt routines
 0x1a3 call $0336
-0x1a5 orl  p2,#$40
-0x1a7 anl  p2,#$7F
+
+// Loop while ignition signal input is low.
+0x1a5 orl  p2,#$40   // Set bit6 in port 2
+0x1a7 anl  p2,#$7F   // Clear bit 8 in port 2
 0x1a9 jnt1 $01A5
+
 0x1ab anl  p2,#$BF
 0x1ad orl  p2,#$80
 0x1af jmp  $01A9
-;; END of trigger/reset routine
+// END of trigger/reset routine
 
-;; timing delay calculation
+// timing delay calculation
 0x1b1 sel  rb1
 0x1b2 mov  r1,#$73
 0x1b4 mov  a,@r1
@@ -329,64 +438,13 @@
 0x1c5 dec  r1
 0x1c6 mov  @r1,a
 0x1c7 jmp  $0200
-;; END of timing delay calculation
-0x1c9 nop
-0x1ca nop
-0x1cb nop
-0x1cc nop
-0x1cd nop
-0x1ce nop
-0x1cf nop
-0x1d0 nop
-0x1d1 nop
-0x1d2 nop
-0x1d3 nop
-0x1d4 nop
-0x1d5 nop
-0x1d6 nop
-0x1d7 nop
-0x1d8 nop
-0x1d9 nop
-0x1da nop
-0x1db nop
-0x1dc nop
-0x1dd nop
-0x1de nop
-0x1df nop
-0x1e0 nop
-0x1e1 nop
-0x1e2 nop
-0x1e3 nop
-0x1e4 nop
-0x1e5 nop
-0x1e6 nop
-0x1e7 nop
-0x1e8 nop
-0x1e9 nop
-0x1ea nop
-0x1eb nop
-0x1ec nop
-0x1ed nop
-0x1ee nop
-0x1ef nop
-0x1f0 nop
-0x1f1 nop
-0x1f2 nop
-0x1f3 nop
-0x1f4 nop
-0x1f5 nop
-0x1f6 nop
-0x1f7 nop
-0x1f8 nop
-0x1f9 nop
-0x1fa nop
-0x1fb nop
-0x1fc nop
-0x1fd nop
+// END of timing delay calculation
+
+// BIG GAP
 0x1fe movp a,@a
 0x1ff ret
 
-;; Blink code calculation
+// Blink code calculation
 0x200 mov  r1,#$33
 0x202 mov  a,@r1
 0x203 add  a,#$EE
@@ -401,13 +459,13 @@
 0x215 mov  r0,#$44
 0x217 mov  a,#$E4
 0x219 add  a,@r0
-0x21a jc   $022F
+0x21a jc   $022F     // If mem[0x44] >= 28 jump 0x22f, ie if RPM is more than
 0x21c mov  r0,#$2F
 0x21e mov  a,#$89
-0x220 add  a,@r0
-0x221 mov  r2,#$22
-0x223 jc   $022A
-0x225 dec  r2
+0x220 add  a,@r0     // If mem[0x2f] >= 137 set carry 
+0x221 mov  r2,#$22   // $22 is the faulty knock sensor blink code
+0x223 jc   $022A     // If carry jump 0x22a
+0x225 dec  r2        // $21 is the engine too noisy blink code
 0x226 mov  a,#$FA
 0x228 add  a,@r0
 0x229 cpl  c
@@ -420,11 +478,13 @@
 0x233 add  a,#$18
 0x235 jc   $0243
 0x237 mov  r0,#$52
-0x239 mov  a,@r0;load current MAP sensor pressure into a
-0x23a add  a,#$BF;add 191
-0x23c cpl  c;c=1 means an error, 0 means no error (checked in 0x32a/0x32c). So it's an error if the add did not carry, iow the MAP pressure value was <=64, that is ~54kpa or -7.8psi (that is 45kpa or 6.5psi before 10 was added in the ADC routine)
-0x23d mov  r2,#$33;this appears to be setting the BCD for a bad MAP sensor
-0x23f mov  r0,#$30;is this the event count for "bad MAP sensor"?
+0x239 mov  a,@r0 // load current MAP sensor pressure into a
+0x23a add  a,#$BF // add 191
+0x23c cpl  c // c=1 means an error, 0 means no error (checked in 0x32a/0x32c). So it's an error if the add
+             // did not carry, iow the MAP pressure value was <=64, that is ~54kpa or -7.8psi (that is 45kpa
+             // or 6.5psi before 10 was added in the ADC routine)
+0x23d mov  r2,#$33 // this appears to be setting the BCD for a bad MAP sensor
+0x23f mov  r0,#$30 // is this the event count for "bad MAP sensor"?
 0x241 call $032A
 0x243 mov  r0,#$2E
 0x245 mov  a,@r0
@@ -444,60 +504,61 @@
 0x25c mov  a,@r0
 0x25d clr  c
 0x25e jnz  $0262
-0x260 call $02B1 ;reset the boost error event counter 35h to the value 64h (100)
-0x262 mov  r0,#$60;load boost error location 60h into r0
-0x264 mov  a,@r0;load actual boost error into a
-0x265 mov  r2,#$32;BCD value for "boost too high"
-0x267 jb7  $027B;boost error is 1's comp. so bit7=overboost
-0x269 mov  r0,#$44;44h contains rpm axis
-0x26b mov  a,@r0;load rpm axis value into a
-0x26c add  a,#$DB;add 219
-0x26e jnc  $0272;c=0 if rpm is > ~2800
-0x270 call $02B1;this resets 35h to the value 64h (100), so no event count for underboost at low rpm
-0x272 mov  r0,#$60;r0 now points to boost error location again
-0x274 mov  a,@r0;load boost error into a
-0x275 dec  r2; r2 now=31h, BCD value for "boost too low"
+0x260 call $02B1  // reset the boost error event counter 35h to the value 64h (100)
+0x262 mov  r0,#$60 // load boost error location 60h into r0
+0x264 mov  a,@r0 // load actual boost error into a
+0x265 mov  r2,#$32 // BCD value for "boost too high"
+0x267 jb7  $027B // boost error is 1's comp. so bit7=overboost
+0x269 mov  r0,#$44 // 44h contains rpm axis
+0x26b mov  a,@r0 // load rpm axis value into a
+0x26c add  a,#$DB // add 219
+0x26e jnc  $0272 // c=0 if rpm is > ~2800
+0x270 call $02B1 // this resets 35h to the value 64h (100), so no event count for underboost at low rpm
+0x272 mov  r0,#$60 // r0 now points to boost error location again
+0x274 mov  a,@r0 // load boost error into a
+0x275 dec  r2 // r2 now=31h, BCD value for "boost too low"
 0x276 cpl  a
-0x277 add  a,#$20;add 32 (i.e. subtract 32 because we just cpl'd)
-0x279 jc   $027D;c=1 means the boost error was < 32
-0x27b add  a,#$20;jmp to here if overboost (from 0x267), with a=boost error from 60h. We also get here if the previous -32 operation didn't carry, i.e. the underboost error was >=32.
-0x27d cpl  c;for underboost, c=1 if the error was < 64. For overboost, c=1 if the error was > 32
-0x27e mov  r0,#$6C;set in ADC MAP read; used to rate limit updates to 52h (current measured boost), and rate limits error checking to 1/4 on rising boost
+0x277 add  a,#$20 // add 32 (i.e. subtract 32 because we just cpl'd)
+0x279 jc   $027D // c=1 means the boost error was < 32
+0x27b add  a,#$20 // jmp to here if overboost (from 0x267), with a=boost error from 60h. We also get here if the previous -32 operation didn't carry, i.e. the underboost error was >=32.
+0x27d cpl  c // for underboost, c=1 if the error was < 64. For overboost, c=1 if the error was > 32
+0x27e mov  r0,#$6C // set in ADC MAP read. Used to rate limit updates to 52h (current measured boost),
+                   // and rate limits error checking to 1/4 on rising boost
 0x280 mov  a,@r0
-0x281 jnz  $0289;skip to the next test if boost error checking is being rate limited by 6Ch
-0x283 mov  r0,#$35;here, r0 is an input parameter to a generic event counter routine
+0x281 jnz  $0289 // skip to the next test if boost error checking is being rate limited by 6Ch
+0x283 mov  r0,#$35 // here, r0 is an input parameter to a generic event counter routine
 0x285 mov  a,#$64
-0x287 call $032C;error counter routine. c=0 no error. c=1, we have an error
-0x289 mov  r0,#$3C;next test, throttle position
-0x28b mov  a,#$F4
-0x28d add  a,@r0
-0x28e cpl  c
-0x28f mov  r2,#$41;BCD code for TPS power
-0x291 jc   $0298
-0x293 mov  a,#$24
-0x295 add  a,@r0
-0x296 inc  r2;BCD code for TPS signal
-0x297 mov  a,@r0
-0x298 mov  @r0,a
-0x299 mov  r0,#$36
-0x29b call $032A
+0x287 call $032C // error counter routine. c=0 no error. c=1, we have an error
+ 0x289 mov  r0,#$3C // next test, throttle position
+ 0x28b mov  a,#$F4
+ 0x28d add  a,@r0
+ 0x28e cpl  c
+ 0x28f mov  r2,#$41 // BCD code for TPS power
+ 0x291 jc   $0298 // if raw_tps < 12 then jump
+ 0x293 mov  a,#$24
+ 0x295 add  a,@r0
+ 0x296 inc  r2 // BCD code for TPS signal
+ 0x297 mov  a,@r0
+ 0x298 mov  @r0,a
+ 0x299 mov  r0,#$36
+ 0x29b call $032A
 0x29d sel  mb1
 0x29e call $0500
 0x2a0 sel  mb0
 0x2a1 call $0336
-;; END of blink code calculation
+// END of blink code calculation
 
-;; stack manipulation for housekeeping functions
-;; See page 2-5 of the MCS-48 pdf. Locations 16h and 17h are the top
-;; of the stack (2-byte value).
-;; We got here from the reset purely by jumping, no calls.
-;; Thus the ret statement at 0x2B0 will use whatever we put on the stack ;; in this routine below.
+// stack manipulation for housekeeping functions
+// See page 2-5 of the MCS-48 pdf. Locations 16h and 17h are the top
+// of the stack (2-byte value).
+// We got here from the reset purely by jumping, no calls.
+// Thus the ret statement at 0x2B0 will use whatever we put on the stack  // in this routine below.
 0x2a3 mov  r1,#$17
-0x2a5 mov  @r1,#$8;17h <- 8 (locations will be 8xxh)
+0x2a5 mov  @r1,#$8 // 17h <- 8 (locations will be 8xxh)
 0x2a7 dec  r1
 0x2a8 clr  a
-0x2a9 xch  a,@r1;a <- 16h
-0x2aa jb0  $02AF;call the first function 0x800?
+0x2a9 xch  a,@r1 // a <- 16h and 16h <- 0
+0x2aa jb0  $02AF // call the first function 0x800?
 0x2ac dec  a
 0x2ad dec  a
 0x2ae xchd a,@r1
@@ -506,96 +567,26 @@
 0x2b1 mov  r0,#$35
 0x2b3 mov  @r0,#$64
 0x2b5 ret
-0x2b6 nop
-0x2b7 nop
-0x2b8 nop
-0x2b9 nop
-0x2ba nop
-0x2bb nop
-0x2bc nop
-0x2bd nop
-0x2be nop
-0x2bf nop
-0x2c0 nop
-0x2c1 nop
-0x2c2 nop
-0x2c3 nop
-0x2c4 nop
-0x2c5 nop
-0x2c6 nop
-0x2c7 nop
-0x2c8 nop
-0x2c9 nop
-0x2ca nop
-0x2cb nop
-0x2cc nop
-0x2cd nop
-0x2ce nop
-0x2cf nop
-0x2d0 nop
-0x2d1 nop
-0x2d2 nop
-0x2d3 nop
-0x2d4 nop
-0x2d5 nop
-0x2d6 nop
-0x2d7 nop
-0x2d8 nop
-0x2d9 nop
-0x2da nop
-0x2db nop
-0x2dc nop
-0x2dd nop
-0x2de nop
-0x2df nop
-0x2e0 nop
-0x2e1 nop
-0x2e2 nop
-0x2e3 nop
-0x2e4 nop
-0x2e5 nop
-0x2e6 nop
-0x2e7 nop
-0x2e8 nop
-0x2e9 nop
-0x2ea nop
-0x2eb nop
-0x2ec nop
-0x2ed nop
-0x2ee nop
-0x2ef nop
-0x2f0 nop
-0x2f1 nop
-0x2f2 nop
-0x2f3 nop
-0x2f4 nop
-0x2f5 nop
-0x2f6 nop
-0x2f7 nop
-0x2f8 nop
-0x2f9 nop
-0x2fa nop
-0x2fb nop
-0x2fc nop
-0x2fd nop
+
+// BIG GAP
 0x2fe movp a,@a
 0x2ff ret
 
-;; 8-bit multiply function (r3 x r6), 16-bit result in a:r3?
-0x300 mov  r5,#$9
-0x302 clr  c
-0x303 clr  a
-0x304 rrc  a
-0x305 xch  a,r3
-0x306 rrc  a
-0x307 xch  a,r3
-0x308 jnc  $030B
-0x30a add  a,r6
+// 8-bit multiply function (r3 x r6), 16-bit result in a:r3
+0x300 mov  r5,#$9    
+0x302 clr  c                                             
+0x303 clr  a         
+0x304 rrc  a         
+0x305 xch  a,r3      
+0x306 rrc  a         
+0x307 xch  a,r3      
+0x308 jnc  $030B     
+0x30a add  a,r6      
 0x30b djnz r5,$0304
 0x30d ret
-;; END of 8-bit multiply function
+// END of 8-bit multiply function
 
-;; main body of ext int routine
+// main body of ext int routine
 0x30e mov  @r0,a
 0x30f mov  r0,#$25
 0x311 mov  a,@r0
@@ -614,31 +605,33 @@
 0x321 mov  r0,#$38
 0x323 mov  a,@r0
 0x324 retr
-;; END ext int routine
+// END ext int routine
 
-;; initialize r4 with 22h
+// initialize r4 with ram[22h]
 0x325 mov  r1,#$22
 0x327 mov  a,@r1
 0x328 mov  r4,a
 0x329 ret
-;; END initialize r4 with 22h
+// END initialize r4 with ram[22h]
 
-;; Count errors and set 33h blink code
+// Count errors and set 33h blink code
+// We called into here from 0x22b. R0 was 0x30. Carry was set.
+// mem[0x30] is a count we decrement.
 0x32a mov  a,#$3C
-0x32c xch  a,@r0
-0x32d jnc  $0331
-0x32f dec  a
-0x330 mov  @r0,a;count is dec'd and stored back if c (error)
-0x331 jnz  $0335;just return if the error counter isn't 0 yet
-0x333 mov  a,r2;r2 should contain the BCD value for the error
-0x334 mov  @r1,a;now the address in r1 (33h) has the error BCD
+0x32c xch  a,@r0  // mem[0x30] := 0x3c
+0x32d jnc  $0331  // Not taken
+0x32f dec  a      // a := 0x3b
+0x330 mov  @r0,a // count is dec'd and stored back if c (error)
+0x331 jnz  $0335 // just return if the error counter isn't 0 yet
+0x333 mov  a,r2 // r2 should contain the BCD value for the error
+0x334 mov  @r1,a // now the address in r1 (33h) has the error BCD
 0x335 ret
-;; END count errors
+// END count errors
 
-;; diagnostic function (unused?)
+// diagnostic function (unused?)
 0x336 mov  r0,#$80
 0x338 mov  r2,#$8
-0x33a movx a,@r0
+0x33a movx a,@r0     // On first execute of this instruction ADC channel 7 is selected
 0x33b jb5  $0353
 0x33d mov  r2,#$4
 0x33f dec  r0
@@ -710,141 +703,55 @@
 0x39a mov  a,@r0
 0x39b mov  @r1,#$FE
 0x39d ret
-;; END diagnostic function
-0x39e nop
-0x39f nop
-0x3a0 nop
-0x3a1 nop
-0x3a2 nop
-0x3a3 nop
-0x3a4 nop
-0x3a5 nop
-0x3a6 nop
-0x3a7 nop
-0x3a8 nop
-0x3a9 nop
-0x3aa nop
-0x3ab nop
-0x3ac nop
-0x3ad nop
-0x3ae nop
-0x3af nop
-0x3b0 nop
-0x3b1 nop
-0x3b2 nop
-0x3b3 nop
-0x3b4 nop
-0x3b5 nop
-0x3b6 nop
-0x3b7 nop
-0x3b8 nop
-0x3b9 nop
-0x3ba nop
-0x3bb nop
-0x3bc nop
-0x3bd nop
-0x3be nop
-0x3bf nop
-0x3c0 nop
-0x3c1 nop
-0x3c2 nop
-0x3c3 nop
-0x3c4 nop
-0x3c5 nop
-0x3c6 nop
-0x3c7 nop
-0x3c8 nop
-0x3c9 nop
-0x3ca nop
-0x3cb nop
-0x3cc nop
-0x3cd nop
-0x3ce nop
-0x3cf nop
-0x3d0 nop
-0x3d1 nop
-0x3d2 nop
-0x3d3 nop
-0x3d4 nop
-0x3d5 nop
-0x3d6 nop
-0x3d7 nop
-0x3d8 nop
-0x3d9 nop
-0x3da nop
-0x3db nop
-0x3dc nop
-0x3dd nop
-0x3de nop
-0x3df nop
-0x3e0 nop
-0x3e1 nop
-0x3e2 nop
-0x3e3 nop
-0x3e4 nop
-0x3e5 nop
-0x3e6 nop
-0x3e7 nop
-0x3e8 nop
-0x3e9 nop
-0x3ea nop
-0x3eb nop
-0x3ec nop
-0x3ed nop
-0x3ee nop
-0x3ef nop
-0x3f0 nop
-0x3f1 nop
-0x3f2 nop
-0x3f3 nop
-0x3f4 nop
-0x3f5 nop
-0x3f6 nop
-0x3f7 nop
-0x3f8 nop
-0x3f9 nop
+// END diagnostic function
+
+// BIG GAP
 0x3fa anl  a,#$60
 0x3fc add  a,r0
 0x3fd orl  a,@r1
 0x3fe movp a,@a
 
-;; ADC routine function table (starts at 0x400)
 0x3ff jmp  $040E
-0x401 movd p4,a
-0x402 movd p4,a
-0x403 movd p4,a
-0x404 clr  a
-0x405 orl  a,r4
-0x406 orld p4,a
-0x407 anl  bus,#$99
-0x409 orld p7,a
-;; END function table
 
+// ADC routine function address table
+0x400 .db  0x0e
+0x401 .db  0x3c
+0x402 .db  0x3c
+0x403 .db  0x3c
+0x404 .db  0x27
+0x405 .db  0x4c
+0x406 .db  0x8c
+0x407 .db  0x98
+// END function table
+
+// Random garbage?
+0x408 .db  0x99
+0x409 .db  0x8f
 0x40a nop
 
-;; ADC routine jump
+// ADC routine jump. Jump to routine N, where N is read from the accumulator
 0x40b anl  a,#$7
-0x40d jmpp @a
-;; END ADC routine jmp
+0x40d jmpp @a     // Reads contents of above table (that starts at 0x400) and writes it to the bottom byte of PC
+// END ADC routine jmp
 
-;; ADC function #1 (address select)
-0x40e anl  p1,#$F7
+// ADC function #1 (address select)
+0x40e anl  p1,#$F7 // Clear ALE. Result is ????_0???
 0x410 mov  a,@r0
 0x411 dec  a
 0x412 jz   $041C
-0x414 anl  p1,#$F3
-0x416 jb4  $041A
-0x418 anl  p1,#$F5
+0x414 anl  p1,#$F3 // Clear MSB of ADC address. Result is ????_00??
+0x416 jb4  $041A   // Jump if bit 4 of accumulator is set
+0x418 anl  p1,#$F5 // Clear middle bit of ADC address. Result is ????_000?
 0x41a jb3  $041E
-0x41c anl  p1,#$F6
-0x41e orl  p2,#$20
-0x420 orl  p1,#$8
+0x41c anl  p1,#$F6 // Clear bottom bit of ADC address. Result is ????_0000
+0x41e orl  p2,#$20 // Set bit 5 of port 2 - knock sensor integrator reset
+0x420 orl  p1,#$8  // Set ADC ALE.
 0x422 anl  p1,#$F5
 0x424 orl  p1,#$5
 0x426 ret
-;; END ADC function #1
+// END ADC function #1
 
-;; ADC function #3 (knock self-test)
+// ADC function #3 (knock self-test)
 0x427 mov  r0,#$23
 0x429 mov  a,@r0
 0x42a mov  r4,a
@@ -859,9 +766,9 @@
 0x438 anl  a,#$7
 0x43a mov  @r0,a
 0x43b ret
-;; END ADC function #3
+// END ADC function #3
 
-;; ADC function #2 (knock self-test)
+// ADC function #2 (knock self-test)
 0x43c add  a,#$7
 0x43e movp a,@a
 0x43f mov  r0,#$2F
@@ -870,14 +777,14 @@
 0x444 mov  r0,#$31
 0x446 mov  a,@r0
 0x447 jnz  $044B
-0x449 anl  p1,#$7F
+0x449 anl  p1,#$7F   // Clear fake knock signal
 0x44b ret
-;; END ADC function #2
+// END ADC function #2
 
-;; ADC function #4 (read ADC ch. 0 - 3)
+// ADC function #4 (read ADC ch. 0 - 3)
 0x44c movx a,@r0
-0x44d orl  p1,#$8
-0x44f anl  p1,#$F4;11110100
+0x44d orl  p1,#$8    // OR with  0000_1000. Set ADC ALE.
+0x44f anl  p1,#$F4   // AND with 1111_0100 -> Result is ????_0?00.
 0x451 xch  a,@r0
 0x452 jb4  $0480
 0x454 jb3  $047B
@@ -885,7 +792,7 @@
 0x457 mov  r1,a
 0x458 mov  a,@r0
 0x459 xrl  a,#$6
-0x45b mov  r0,#$2F;knock sensor noise
+0x45b mov  r0,#$2F // knock sensor noise
 0x45d jz   $0476
 0x45f mov  a,#$C0
 0x461 add  a,r1
@@ -907,21 +814,23 @@
 0x479 mov  @r0,a
 0x47a ret
 0x47b xch  a,@r0
-0x47c mov  r0,#$2E;battery voltage
+0x47c mov  r0,#$2E // battery voltage
 0x47e mov  @r0,a
 0x47f ret
+
 0x480 jb3  $0487
 0x482 xch  a,@r0
 0x483 mov  r0,#$6F
 0x485 nop
 0x486 ret
 0x487 xch  a,@r0
-0x488 mov  r0,#$39;TPS v+ ?
+0x488 mov  r0,#$39 // TPS v+ ?
 0x48a mov  @r0,a
 0x48b ret
-;; END ADC function #4
+// END ADC function #4
 
-;; ADC function #5 (read ch. 5 knock sensor)
+// ADC function #5 (read ch. 5 knock sensor)
+// Andy - Manifold air pressure?
 0x48c movx a,@r0
 0x48d orl  p1,#$8
 0x48f anl  p1,#$F7
@@ -930,1124 +839,73 @@
 0x495 cpl  a
 0x496 mov  @r0,a
 0x497 ret
-;; END ADC function #5
+// END ADC function #5
 
-;; ADC function #6 (MAP sensor?) Summary: read the ADC value, add 10 and compare it to the previous value to determine if boost is increasing or not. If it is increasing, then only update 52h and run boost error correction every 4th time. Otherwise, we keep the old value in 52h and run error checking every time. So boost has to be increasing for 4 cycles in a row to count as an increased value.
+// ADC function #6 (MAP sensor?) Summary: read the ADC value, add 10 and
+// compare it to the previous value to determine if boost is increasing or not.
+// If it is increasing, then only update 52h and run boost error correction
+// every 4th time. Otherwise, we keep the old value in 52h and run error
+// checking every time. So boost has to be increasing for 4 cycles in a row to
+// count as an increased value.
 0x498 mov  r0,#$52
 0x49a movx a,@r0
-0x49b add  a,#$A;add 10 to the value from 52h
-0x49d mov  r4,a;r4 <- value from 52h + 10
+0x49b add  a,#$A // add 10 to the value from 52h
+0x49d mov  r4,a // r4 <- value from 52h + 10
 0x49e cpl  a
 0x49f add  a,@r0
-0x4a0 mov  r0,#$6C;used in blink code checking - we only trigger boost codes if this is 0
-0x4a2 orl  p1,#$8;latch or unlatch ALE?
-0x4a4 anl  p1,#$F7;select 11110111 (iow address ch.7, TPS angle for the nead read cycle)
-0x4a6 jnc  $04B1;c=0 if boost is increasing
-0x4a8 mov  @r0,#$0;here 6Ch is set to 0 which enables boost error code checking
+0x4a0 mov  r0,#$6C // used in blink code checking - we only trigger boost codes if this is 0
+0x4a2 orl  p1,#$8 // latch or unlatch ALE?
+0x4a4 anl  p1,#$F7 // select 11110111 (iow address ch.7, TPS angle for the nead read cycle)
+0x4a6 jnc  $04B1 // c=0 if boost is increasing
+0x4a8 mov  @r0,#$0 // here 6Ch is set to 0 which enables boost error code checking
 0x4aa mov  r0,#$52
 0x4ac mov  a,r4
-0x4ad mov  @r0,a;store the value from r4 into 52h
-0x4ae mov  r4,#$FF;r4 <- 255
+0x4ad mov  @r0,a // store the value from r4 into 52h
+0x4ae mov  r4,#$FF // r4 <- 255
 0x4b0 ret
-0x4b1 inc  @r0;inc the value in 6Ch
+0x4b1 inc  @r0 // inc the value in 6Ch
 0x4b2 mov  a,@r0
-0x4b3 jb2  $04A8;looks like we only enable error code checking every 4th read?
+0x4b3 jb2  $04A8 // looks like we only enable error code checking every 4th read?
 0x4b5 mov  r4,#$FF
 0x4b7 ret
-;; END ADC function #6
+// END ADC function #6
 
-0x4b8 nop
-0x4b9 nop
-0x4ba nop
-0x4bb nop
-0x4bc nop
-0x4bd nop
-0x4be nop
-0x4bf nop
-0x4c0 nop
-0x4c1 nop
-0x4c2 nop
-0x4c3 nop
-0x4c4 nop
-0x4c5 nop
-0x4c6 nop
-0x4c7 nop
-0x4c8 nop
-0x4c9 nop
-0x4ca nop
-0x4cb nop
-0x4cc nop
-0x4cd nop
-0x4ce nop
-0x4cf nop
-0x4d0 nop
-0x4d1 nop
-0x4d2 nop
-0x4d3 nop
-0x4d4 nop
-0x4d5 nop
-0x4d6 nop
-0x4d7 nop
-0x4d8 nop
-0x4d9 nop
-0x4da nop
-0x4db nop
-0x4dc nop
-0x4dd nop
-0x4de nop
-0x4df nop
-0x4e0 nop
-0x4e1 nop
-0x4e2 nop
-0x4e3 nop
-0x4e4 nop
-0x4e5 nop
-0x4e6 nop
-0x4e7 nop
-0x4e8 nop
-0x4e9 nop
-0x4ea nop
-0x4eb nop
-0x4ec nop
-0x4ed nop
-0x4ee nop
-0x4ef nop
-0x4f0 nop
-0x4f1 nop
-0x4f2 nop
-0x4f3 nop
-0x4f4 nop
-0x4f5 nop
-0x4f6 nop
-0x4f7 nop
-0x4f8 nop
-0x4f9 nop
-0x4fa nop
-0x4fb nop
-0x4fc nop
-0x4fd nop
+// BIG GAP
 0x4fe movp a,@a
 0x4ff ret
-0x500 nop
-0x501 nop
-0x502 nop
-0x503 nop
-0x504 nop
-0x505 nop
-0x506 nop
-0x507 nop
-0x508 nop
-0x509 nop
-0x50a nop
-0x50b nop
-0x50c nop
-0x50d nop
-0x50e nop
-0x50f nop
-0x510 nop
-0x511 nop
-0x512 nop
-0x513 nop
-0x514 nop
-0x515 nop
-0x516 nop
-0x517 nop
-0x518 nop
-0x519 nop
-0x51a nop
-0x51b nop
-0x51c nop
-0x51d nop
-0x51e nop
-0x51f nop
-0x520 nop
-0x521 nop
-0x522 nop
-0x523 nop
-0x524 nop
-0x525 nop
-0x526 nop
-0x527 nop
-0x528 nop
-0x529 nop
-0x52a nop
-0x52b nop
-0x52c nop
-0x52d nop
-0x52e nop
-0x52f nop
-0x530 nop
-0x531 nop
-0x532 nop
-0x533 nop
-0x534 nop
-0x535 nop
-0x536 nop
-0x537 nop
-0x538 nop
-0x539 nop
-0x53a nop
-0x53b nop
-0x53c nop
-0x53d nop
-0x53e nop
-0x53f nop
-0x540 nop
-0x541 nop
-0x542 nop
-0x543 nop
-0x544 nop
-0x545 nop
-0x546 nop
-0x547 nop
-0x548 nop
-0x549 nop
-0x54a nop
-0x54b nop
-0x54c nop
-0x54d nop
-0x54e nop
-0x54f nop
-0x550 nop
-0x551 nop
-0x552 nop
-0x553 nop
-0x554 nop
-0x555 nop
-0x556 nop
-0x557 nop
-0x558 nop
-0x559 nop
-0x55a nop
-0x55b nop
-0x55c nop
-0x55d nop
-0x55e nop
-0x55f nop
-0x560 nop
-0x561 nop
-0x562 nop
-0x563 nop
-0x564 nop
-0x565 nop
-0x566 nop
-0x567 nop
-0x568 nop
-0x569 nop
-0x56a nop
-0x56b nop
-0x56c nop
-0x56d nop
-0x56e nop
-0x56f nop
-0x570 nop
-0x571 nop
-0x572 nop
-0x573 nop
-0x574 nop
-0x575 nop
-0x576 nop
-0x577 nop
-0x578 nop
-0x579 nop
-0x57a nop
-0x57b nop
-0x57c nop
-0x57d nop
-0x57e nop
-0x57f nop
-0x580 nop
-0x581 nop
-0x582 nop
-0x583 nop
-0x584 nop
-0x585 nop
-0x586 nop
-0x587 nop
-0x588 nop
-0x589 nop
-0x58a nop
-0x58b nop
-0x58c nop
-0x58d nop
-0x58e nop
-0x58f nop
-0x590 nop
-0x591 nop
-0x592 nop
-0x593 nop
-0x594 nop
-0x595 nop
-0x596 nop
-0x597 nop
-0x598 nop
-0x599 nop
-0x59a nop
-0x59b nop
-0x59c nop
-0x59d nop
-0x59e nop
-0x59f nop
-0x5a0 nop
-0x5a1 nop
-0x5a2 nop
-0x5a3 nop
-0x5a4 nop
-0x5a5 nop
-0x5a6 nop
-0x5a7 nop
-0x5a8 nop
-0x5a9 nop
-0x5aa nop
-0x5ab nop
-0x5ac nop
-0x5ad nop
-0x5ae nop
-0x5af nop
-0x5b0 nop
-0x5b1 nop
-0x5b2 nop
-0x5b3 nop
-0x5b4 nop
-0x5b5 nop
-0x5b6 nop
-0x5b7 nop
-0x5b8 nop
-0x5b9 nop
-0x5ba nop
-0x5bb nop
-0x5bc nop
-0x5bd nop
-0x5be nop
-0x5bf nop
-0x5c0 nop
-0x5c1 nop
-0x5c2 nop
-0x5c3 nop
-0x5c4 nop
-0x5c5 nop
-0x5c6 nop
-0x5c7 nop
-0x5c8 nop
-0x5c9 nop
-0x5ca nop
-0x5cb nop
-0x5cc nop
-0x5cd nop
-0x5ce nop
-0x5cf nop
-0x5d0 nop
-0x5d1 nop
-0x5d2 nop
-0x5d3 nop
-0x5d4 nop
-0x5d5 nop
-0x5d6 nop
-0x5d7 nop
-0x5d8 nop
-0x5d9 nop
-0x5da nop
-0x5db nop
-0x5dc nop
-0x5dd nop
-0x5de nop
-0x5df nop
-0x5e0 nop
-0x5e1 nop
-0x5e2 nop
-0x5e3 nop
-0x5e4 nop
-0x5e5 nop
-0x5e6 nop
-0x5e7 nop
-0x5e8 nop
-0x5e9 nop
-0x5ea nop
-0x5eb nop
-0x5ec nop
-0x5ed nop
-0x5ee nop
-0x5ef nop
-0x5f0 nop
-0x5f1 nop
-0x5f2 nop
-0x5f3 nop
-0x5f4 nop
-0x5f5 nop
-0x5f6 nop
-0x5f7 nop
-0x5f8 nop
-0x5f9 nop
-0x5fa nop
-0x5fb nop
-0x5fc nop
-0x5fd nop
+
+// BIG GAP
 0x5fe movp a,@a
 0x5ff ret
-0x600 nop
-0x601 nop
-0x602 nop
-0x603 nop
-0x604 nop
-0x605 nop
-0x606 nop
-0x607 nop
-0x608 nop
-0x609 nop
-0x60a nop
-0x60b nop
-0x60c nop
-0x60d nop
-0x60e nop
-0x60f nop
-0x610 nop
-0x611 nop
-0x612 nop
-0x613 nop
-0x614 nop
-0x615 nop
-0x616 nop
-0x617 nop
-0x618 nop
-0x619 nop
-0x61a nop
-0x61b nop
-0x61c nop
-0x61d nop
-0x61e nop
-0x61f nop
-0x620 nop
-0x621 nop
-0x622 nop
-0x623 nop
-0x624 nop
-0x625 nop
-0x626 nop
-0x627 nop
-0x628 nop
-0x629 nop
-0x62a nop
-0x62b nop
-0x62c nop
-0x62d nop
-0x62e nop
-0x62f nop
-0x630 nop
-0x631 nop
-0x632 nop
-0x633 nop
-0x634 nop
-0x635 nop
-0x636 nop
-0x637 nop
-0x638 nop
-0x639 nop
-0x63a nop
-0x63b nop
-0x63c nop
-0x63d nop
-0x63e nop
-0x63f nop
-0x640 nop
-0x641 nop
-0x642 nop
-0x643 nop
-0x644 nop
-0x645 nop
-0x646 nop
-0x647 nop
-0x648 nop
-0x649 nop
-0x64a nop
-0x64b nop
-0x64c nop
-0x64d nop
-0x64e nop
-0x64f nop
-0x650 nop
-0x651 nop
-0x652 nop
-0x653 nop
-0x654 nop
-0x655 nop
-0x656 nop
-0x657 nop
-0x658 nop
-0x659 nop
-0x65a nop
-0x65b nop
-0x65c nop
-0x65d nop
-0x65e nop
-0x65f nop
-0x660 nop
-0x661 nop
-0x662 nop
-0x663 nop
-0x664 nop
-0x665 nop
-0x666 nop
-0x667 nop
-0x668 nop
-0x669 nop
-0x66a nop
-0x66b nop
-0x66c nop
-0x66d nop
-0x66e nop
-0x66f nop
-0x670 nop
-0x671 nop
-0x672 nop
-0x673 nop
-0x674 nop
-0x675 nop
-0x676 nop
-0x677 nop
-0x678 nop
-0x679 nop
-0x67a nop
-0x67b nop
-0x67c nop
-0x67d nop
-0x67e nop
-0x67f nop
-0x680 nop
-0x681 nop
-0x682 nop
-0x683 nop
-0x684 nop
-0x685 nop
-0x686 nop
-0x687 nop
-0x688 nop
-0x689 nop
-0x68a nop
-0x68b nop
-0x68c nop
-0x68d nop
-0x68e nop
-0x68f nop
-0x690 nop
-0x691 nop
-0x692 nop
-0x693 nop
-0x694 nop
-0x695 nop
-0x696 nop
-0x697 nop
-0x698 nop
-0x699 nop
-0x69a nop
-0x69b nop
-0x69c nop
-0x69d nop
-0x69e nop
-0x69f nop
-0x6a0 nop
-0x6a1 nop
-0x6a2 nop
-0x6a3 nop
-0x6a4 nop
-0x6a5 nop
-0x6a6 nop
-0x6a7 nop
-0x6a8 nop
-0x6a9 nop
-0x6aa nop
-0x6ab nop
-0x6ac nop
-0x6ad nop
-0x6ae nop
-0x6af nop
-0x6b0 nop
-0x6b1 nop
-0x6b2 nop
-0x6b3 nop
-0x6b4 nop
-0x6b5 nop
-0x6b6 nop
-0x6b7 nop
-0x6b8 nop
-0x6b9 nop
-0x6ba nop
-0x6bb nop
-0x6bc nop
-0x6bd nop
-0x6be nop
-0x6bf nop
-0x6c0 nop
-0x6c1 nop
-0x6c2 nop
-0x6c3 nop
-0x6c4 nop
-0x6c5 nop
-0x6c6 nop
-0x6c7 nop
-0x6c8 nop
-0x6c9 nop
-0x6ca nop
-0x6cb nop
-0x6cc nop
-0x6cd nop
-0x6ce nop
-0x6cf nop
-0x6d0 nop
-0x6d1 nop
-0x6d2 nop
-0x6d3 nop
-0x6d4 nop
-0x6d5 nop
-0x6d6 nop
-0x6d7 nop
-0x6d8 nop
-0x6d9 nop
-0x6da nop
-0x6db nop
-0x6dc nop
-0x6dd nop
-0x6de nop
-0x6df nop
-0x6e0 nop
-0x6e1 nop
-0x6e2 nop
-0x6e3 nop
-0x6e4 nop
-0x6e5 nop
-0x6e6 nop
-0x6e7 nop
-0x6e8 nop
-0x6e9 nop
-0x6ea nop
-0x6eb nop
-0x6ec nop
-0x6ed nop
-0x6ee nop
-0x6ef nop
-0x6f0 nop
-0x6f1 nop
-0x6f2 nop
-0x6f3 nop
-0x6f4 nop
-0x6f5 nop
-0x6f6 nop
-0x6f7 nop
-0x6f8 nop
-0x6f9 nop
-0x6fa nop
-0x6fb nop
-0x6fc nop
-0x6fd nop
+
+// BIG GAP
 0x6fe movp a,@a
 0x6ff ret
-0x700 nop
-0x701 nop
-0x702 nop
-0x703 nop
-0x704 nop
-0x705 nop
-0x706 nop
-0x707 nop
-0x708 nop
-0x709 nop
-0x70a nop
-0x70b nop
-0x70c nop
-0x70d nop
-0x70e nop
-0x70f nop
-0x710 nop
-0x711 nop
-0x712 nop
-0x713 nop
-0x714 nop
-0x715 nop
-0x716 nop
-0x717 nop
-0x718 nop
-0x719 nop
-0x71a nop
-0x71b nop
-0x71c nop
-0x71d nop
-0x71e nop
-0x71f nop
-0x720 nop
-0x721 nop
-0x722 nop
-0x723 nop
-0x724 nop
-0x725 nop
-0x726 nop
-0x727 nop
-0x728 nop
-0x729 nop
-0x72a nop
-0x72b nop
-0x72c nop
-0x72d nop
-0x72e nop
-0x72f nop
-0x730 nop
-0x731 nop
-0x732 nop
-0x733 nop
-0x734 nop
-0x735 nop
-0x736 nop
-0x737 nop
-0x738 nop
-0x739 nop
-0x73a nop
-0x73b nop
-0x73c nop
-0x73d nop
-0x73e nop
-0x73f nop
-0x740 nop
-0x741 nop
-0x742 nop
-0x743 nop
-0x744 nop
-0x745 nop
-0x746 nop
-0x747 nop
-0x748 nop
-0x749 nop
-0x74a nop
-0x74b nop
-0x74c nop
-0x74d nop
-0x74e nop
-0x74f nop
-0x750 nop
-0x751 nop
-0x752 nop
-0x753 nop
-0x754 nop
-0x755 nop
-0x756 nop
-0x757 nop
-0x758 nop
-0x759 nop
-0x75a nop
-0x75b nop
-0x75c nop
-0x75d nop
-0x75e nop
-0x75f nop
-0x760 nop
-0x761 nop
-0x762 nop
-0x763 nop
-0x764 nop
-0x765 nop
-0x766 nop
-0x767 nop
-0x768 nop
-0x769 nop
-0x76a nop
-0x76b nop
-0x76c nop
-0x76d nop
-0x76e nop
-0x76f nop
-0x770 nop
-0x771 nop
-0x772 nop
-0x773 nop
-0x774 nop
-0x775 nop
-0x776 nop
-0x777 nop
-0x778 nop
-0x779 nop
-0x77a nop
-0x77b nop
-0x77c nop
-0x77d nop
-0x77e nop
-0x77f nop
-0x780 nop
-0x781 nop
-0x782 nop
-0x783 nop
-0x784 nop
-0x785 nop
-0x786 nop
-0x787 nop
-0x788 nop
-0x789 nop
-0x78a nop
-0x78b nop
-0x78c nop
-0x78d nop
-0x78e nop
-0x78f nop
-0x790 nop
-0x791 nop
-0x792 nop
-0x793 nop
-0x794 nop
-0x795 nop
-0x796 nop
-0x797 nop
-0x798 nop
-0x799 nop
-0x79a nop
-0x79b nop
-0x79c nop
-0x79d nop
-0x79e nop
-0x79f nop
-0x7a0 nop
-0x7a1 nop
-0x7a2 nop
-0x7a3 nop
-0x7a4 nop
-0x7a5 nop
-0x7a6 nop
-0x7a7 nop
-0x7a8 nop
-0x7a9 nop
-0x7aa nop
-0x7ab nop
-0x7ac nop
-0x7ad nop
-0x7ae nop
-0x7af nop
-0x7b0 nop
-0x7b1 nop
-0x7b2 nop
-0x7b3 nop
-0x7b4 nop
-0x7b5 nop
-0x7b6 nop
-0x7b7 nop
-0x7b8 nop
-0x7b9 nop
-0x7ba nop
-0x7bb nop
-0x7bc nop
-0x7bd nop
-0x7be nop
-0x7bf nop
-0x7c0 nop
-0x7c1 nop
-0x7c2 nop
-0x7c3 nop
-0x7c4 nop
-0x7c5 nop
-0x7c6 nop
-0x7c7 nop
-0x7c8 nop
-0x7c9 nop
-0x7ca nop
-0x7cb nop
-0x7cc nop
-0x7cd nop
-0x7ce nop
-0x7cf nop
-0x7d0 nop
-0x7d1 nop
-0x7d2 nop
-0x7d3 nop
-0x7d4 nop
-0x7d5 nop
-0x7d6 nop
-0x7d7 nop
-0x7d8 nop
-0x7d9 nop
-0x7da nop
-0x7db nop
-0x7dc nop
-0x7dd nop
-0x7de nop
-0x7df nop
-0x7e0 nop
-0x7e1 nop
-0x7e2 nop
-0x7e3 nop
-0x7e4 nop
-0x7e5 nop
-0x7e6 nop
-0x7e7 nop
-0x7e8 nop
-0x7e9 nop
-0x7ea nop
-0x7eb nop
-0x7ec nop
-0x7ed nop
-0x7ee nop
-0x7ef nop
-0x7f0 nop
-0x7f1 nop
-0x7f2 nop
-0x7f3 nop
-0x7f4 nop
-0x7f5 nop
-0x7f6 nop
-0x7f7 nop
-0x7f8 nop
-0x7f9 nop
-0x7fa nop
-0x7fb nop
-0x7fc nop
-0x7fd nop
+
+// BIG GAP
 0x7fe movp a,@a
 0x7ff ret
 
-;; housekeeping function list (add 0x800h to calls)
-0x800 call $020F;call throttle angle calculation? (A0E or A0F)
+// housekeeping function list (add 0x800h to calls)
+0x800 call $020F // call throttle angle calculation? (A0E or A0F)
 0x802 call $028D
 0x804 call $0257
 0x806 call $0282
 0x808 nop
 0x809 nop
-0x80a call $029E;calculate ADC angles (A9E)
-0x80c call $0100;read maps (900)
+0x80a call $029E // calculate ADC angles (A9E)
+0x80c call $0100 // read maps (900)
 0x80e nop
 0x80f nop
 0x810 call $0012
 0x812 jmp  $0012
-;; END housekeeping function list
-0x814 nop
-0x815 nop
-0x816 nop
-0x817 nop
-0x818 nop
-0x819 nop
-0x81a nop
-0x81b nop
-0x81c nop
-0x81d nop
-0x81e nop
-0x81f nop
-0x820 nop
-0x821 nop
-0x822 nop
-0x823 nop
-0x824 nop
-0x825 nop
-0x826 nop
-0x827 nop
-0x828 nop
-0x829 nop
-0x82a nop
-0x82b nop
-0x82c nop
-0x82d nop
-0x82e nop
-0x82f nop
-0x830 nop
-0x831 nop
-0x832 nop
-0x833 nop
-0x834 nop
-0x835 nop
-0x836 nop
-0x837 nop
-0x838 nop
-0x839 nop
-0x83a nop
-0x83b nop
-0x83c nop
-0x83d nop
-0x83e nop
-0x83f nop
-0x840 nop
-0x841 nop
-0x842 nop
-0x843 nop
-0x844 nop
-0x845 nop
-0x846 nop
-0x847 nop
-0x848 nop
-0x849 nop
-0x84a nop
-0x84b nop
-0x84c nop
-0x84d nop
-0x84e nop
-0x84f nop
-0x850 nop
-0x851 nop
-0x852 nop
-0x853 nop
-0x854 nop
-0x855 nop
-0x856 nop
-0x857 nop
-0x858 nop
-0x859 nop
-0x85a nop
-0x85b nop
-0x85c nop
-0x85d nop
-0x85e nop
-0x85f nop
-0x860 nop
-0x861 nop
-0x862 nop
-0x863 nop
-0x864 nop
-0x865 nop
-0x866 nop
-0x867 nop
-0x868 nop
-0x869 nop
-0x86a nop
-0x86b nop
-0x86c nop
-0x86d nop
-0x86e nop
-0x86f nop
-0x870 nop
-0x871 nop
-0x872 nop
-0x873 nop
-0x874 nop
-0x875 nop
-0x876 nop
-0x877 nop
-0x878 nop
-0x879 nop
-0x87a nop
-0x87b nop
-0x87c nop
-0x87d nop
-0x87e nop
-0x87f nop
-0x880 nop
-0x881 nop
-0x882 nop
-0x883 nop
-0x884 nop
-0x885 nop
-0x886 nop
-0x887 nop
-0x888 nop
-0x889 nop
-0x88a nop
-0x88b nop
-0x88c nop
-0x88d nop
-0x88e nop
-0x88f nop
-0x890 nop
-0x891 nop
-0x892 nop
-0x893 nop
-0x894 nop
-0x895 nop
-0x896 nop
-0x897 nop
-0x898 nop
-0x899 nop
-0x89a nop
-0x89b nop
-0x89c nop
-0x89d nop
-0x89e nop
-0x89f nop
-0x8a0 nop
-0x8a1 nop
-0x8a2 nop
-0x8a3 nop
-0x8a4 nop
-0x8a5 nop
-0x8a6 nop
-0x8a7 nop
-0x8a8 nop
-0x8a9 nop
-0x8aa nop
-0x8ab nop
-0x8ac nop
-0x8ad nop
-0x8ae nop
-0x8af nop
-0x8b0 nop
-0x8b1 nop
-0x8b2 nop
-0x8b3 nop
-0x8b4 nop
-0x8b5 nop
-0x8b6 nop
-0x8b7 nop
-0x8b8 nop
-0x8b9 nop
-0x8ba nop
-0x8bb nop
-0x8bc nop
-0x8bd nop
-0x8be nop
-0x8bf nop
-0x8c0 nop
-0x8c1 nop
-0x8c2 nop
-0x8c3 nop
-0x8c4 nop
-0x8c5 nop
-0x8c6 nop
-0x8c7 nop
-0x8c8 nop
-0x8c9 nop
-0x8ca nop
-0x8cb nop
-0x8cc nop
-0x8cd nop
-0x8ce nop
-0x8cf nop
-0x8d0 nop
-0x8d1 nop
-0x8d2 nop
-0x8d3 nop
-0x8d4 nop
-0x8d5 nop
-0x8d6 nop
-0x8d7 nop
-0x8d8 nop
-0x8d9 nop
-0x8da nop
-0x8db nop
-0x8dc nop
-0x8dd nop
-0x8de nop
-0x8df nop
-0x8e0 nop
-0x8e1 nop
-0x8e2 nop
-0x8e3 nop
-0x8e4 nop
-0x8e5 nop
-0x8e6 nop
-0x8e7 nop
-0x8e8 nop
-0x8e9 nop
-0x8ea nop
-0x8eb nop
-0x8ec nop
-0x8ed nop
-0x8ee nop
-0x8ef nop
-0x8f0 nop
-0x8f1 nop
-0x8f2 nop
-0x8f3 nop
-0x8f4 nop
-0x8f5 nop
-0x8f6 nop
-0x8f7 nop
-0x8f8 nop
-0x8f9 nop
-0x8fa nop
-0x8fb nop
-0x8fc nop
-0x8fd nop
+// END housekeeping function list
+
+// BIG GAP
 0x8fe movp a,@a
 0x8ff ret
-;; read maps (rpm and PID gain)
+
+// read maps (rpm and PID gain)
 0x900 mov  r1,#$44
 0x902 mov  a,@r1
 0x903 rl   a
@@ -2076,9 +934,9 @@
 0x921 mov  r1,#$6B
 0x923 mov  @r1,a
 0x924 ret
-;; END read maps
+// END read maps
 
-;; RPM maps
+// RPM maps
 0x925 .db  0x2A
 0x926 .db  0x9B
 0x927 .db  0x9B
@@ -2188,9 +1046,9 @@
 0x98f .db  0x04
 0x990 .db  0x04
 0x991 .db  0x00
-;; END rpm maps
+// END rpm maps
 
-;; PID gain 8x4 map (rpm/throttle)
+// PID gain 8x4 map (rpm/throttle)
 0x992 .db  0xE9
 0x993 .db  0xE9
 0x994 .db  0xE6
@@ -2223,88 +1081,13 @@
 0x9af .db  0x67
 0x9b0 .db  0xA3
 0x9b1 .db  0xE3
-;; PID gain 8x4 map
+// PID gain 8x4 map
 
-0x9b2 nop
-0x9b3 nop
-0x9b4 nop
-0x9b5 nop
-0x9b6 nop
-0x9b7 nop
-0x9b8 nop
-0x9b9 nop
-0x9ba nop
-0x9bb nop
-0x9bc nop
-0x9bd nop
-0x9be nop
-0x9bf nop
-0x9c0 nop
-0x9c1 nop
-0x9c2 nop
-0x9c3 nop
-0x9c4 nop
-0x9c5 nop
-0x9c6 nop
-0x9c7 nop
-0x9c8 nop
-0x9c9 nop
-0x9ca nop
-0x9cb nop
-0x9cc nop
-0x9cd nop
-0x9ce nop
-0x9cf nop
-0x9d0 nop
-0x9d1 nop
-0x9d2 nop
-0x9d3 nop
-0x9d4 nop
-0x9d5 nop
-0x9d6 nop
-0x9d7 nop
-0x9d8 nop
-0x9d9 nop
-0x9da nop
-0x9db nop
-0x9dc nop
-0x9dd nop
-0x9de nop
-0x9df nop
-0x9e0 nop
-0x9e1 nop
-0x9e2 nop
-0x9e3 nop
-0x9e4 nop
-0x9e5 nop
-0x9e6 nop
-0x9e7 nop
-0x9e8 nop
-0x9e9 nop
-0x9ea nop
-0x9eb nop
-0x9ec nop
-0x9ed nop
-0x9ee nop
-0x9ef nop
-0x9f0 nop
-0x9f1 nop
-0x9f2 nop
-0x9f3 nop
-0x9f4 nop
-0x9f5 nop
-0x9f6 nop
-0x9f7 nop
-0x9f8 nop
-0x9f9 nop
-0x9fa nop
-0x9fb nop
-0x9fc nop
-0x9fd nop
+// BIG GAP
 0x9fe movp a,@a
 0x9ff ret
 
-;; RPM axis map
+// RPM axis map
 0xa00 .db  0x01
 0xa01 .db  0x01
 0xa02 .db  0x02
@@ -2319,54 +1102,55 @@
 0xa0b .db  0x03
 0xa0c .db  0x03
 0xa0d .db  0x04
-0xa0e .db  0x04;added manually by me, see note below!
-;; END RPM axis map
+0xa0e .db  0x04 // added manually by me, see note below!
+// END RPM axis map
 
-;; read throttle angle calculation.
-;; This was disassembled incorrectly.
-;; Location 0A0E = 04, this should be part of the map above
-;; location 0A0F = B9 = 1011 1001 = mov r1, XX
-;; location 0A10 = 3C, so we have "mov r1, 3C".
-;; location 0A11 = F1 = 1111 0001 = mov a, @r1
+// read throttle angle calculation.
+// This was disassembled incorrectly.
+// Location 0A0E = 04, this should be part of the map above
+// location 0A0F = B9 = 1011 1001 = mov r1, XX
+// location 0A10 = 3C, so we have "mov r1, 3C".
+// location 0A11 = F1 = 1111 0001 = mov a, @r1
 
-;;0xa0e jmp  $00B9
-;;0xa10 movd p4,a
+// 0xa0e jmp  $00B9
+// 0xa10 movd p4,a
 
-0xa0f mov  r1,#$3C;added manually by me, see note above
+0xa0f mov  r1,#$3C // added manually by me, see note above
 0xa11 mov  a,@r1
 0xa12 cpl  a
 0xa13 inc  r1
 0xa14 add  a,@r1
 0xa15 mov  r1,#$3F
-0xa17 jc   $0A1F;c=1 if 3C > 3D (throttle increasing?)
+0xa17 jc   $0A1F // c=1 if 3C > 3D (throttle increasing?)
 0xa19 add  a,#$6
-0xa1b jc   $0A1F;c=1 if 3C > 3D-6
-0xa1d mov  @r1,#$B;3F <- 11=0000 01011
+0xa1b jc   $0A1F // c=1 if 3C > 3D-6
+0xa1d mov  @r1,#$B // 3F <- 11=0000 01011
 0xa1f mov  a,@r1
 0xa20 jz   $0A23
 0xa22 dec  a
 0xa23 anl  a,#$F
 0xa25 mov  @r1,a
-0xa26 mov  r1,#$3C
-0xa28 mov  a,@r1
+0xa26 mov  r1,#$3C // Read raw throttle pos sensor
+0xa28 mov  a,@r1   // into a
+
 0xa29 mov  r6,a
-0xa2a dec  r1
+0xa2a dec  r1     // r1 now holds 3b, the address of a processed version of the TPS supply voltage
 0xa2b mov  a,@r1
 0xa2c mov  r3,a
 0xa2d sel  mb0
-0xa2e call $0300;8x8=16 multiply, so r3:a = 3Ch x 3Bh. 3B is initialized to 119 in the trigger routine.
+0xa2e call $0300 // 8x8=16 multiply, so r3:a = 3Ch x 3Bh. 3B is initialized to 119 in the trigger routine.
 0xa30 sel  mb1
-0xa31 dec  r1;r1 <- 3A
-0xa32 mov  @r1,a;3A <- high byte of the multiply
-0xa33 add  a,#$CB;203
+0xa31 dec  r1    // r1 := 3a, the address of the throttle position in degrees
+0xa32 mov  @r1,a // 3A <- high byte of the multiply
+0xa33 add  a,#$CB // 203
 0xa35 jc   $0A38
 0xa37 clr  a
 0xa38 mov  r1,#$43
-0xa3a mov  @r1,a;43h <- 3Ah + 203, or zero if 3Ah+203 < 255
-0xa3b mov  a,#$E3;227
+0xa3a mov  @r1,a // 43h <- 3Ah + 203, or zero if 3Ah+203 < 255
+0xa3b mov  a,#$E3 // 227
 0xa3d add  a,@r1
 0xa3e jnc  $0A42
-0xa40 mov  @r1,#$1C;43h <- 28 if 43h is >
+0xa40 mov  @r1,#$1C // 43h <- 28 if 43h is >
 0xa42 mov  r1,#$39
 0xa44 mov  a,@r1
 0xa45 mov  r6,a
@@ -2374,18 +1158,18 @@
 0xa48 mov  a,@r1
 0xa49 mov  r3,a
 0xa4a sel  mb0
-0xa4b call $0300;r3:a = 39h x 3Bh (high byte)
+0xa4b call $0300 // r3:a = 39h x 3Bh (high byte)
 0xa4d sel  mb1
-0xa4e add  a,#$A3;163
+0xa4e add  a,#$A3 // 163
 0xa50 jz   $0A56
 0xa52 cpl  a
 0xa53 inc  a
 0xa54 add  a,@r1
 0xa55 mov  @r1,a
 0xa56 ret
-;; END throttle angle calculation
+// END throttle angle calculation
 
-;; read rpm axis function
+// read rpm axis function
 0xa57 mov  r1,#$44
 0xa59 mov  r0,#$24
 0xa5b mov  r6,#$0
@@ -2419,9 +1203,9 @@
 0xa7f xch  a,r6
 0xa80 mov  @r1,a
 0xa81 ret
-;; END read rpm axis function
+// END read rpm axis function
 
-;; read CV feedforward map
+// read CV feedforward map
 0xa82 mov  r0,#$43
 0xa84 mov  r1,#$44
 0xa86 clr  f1
@@ -2429,9 +1213,9 @@
 0xa89 mov  r1,#$68
 0xa8b mov  @r1,a
 0xa8c ret
-;; END read CV feedforward map
+// END read CV feedforward map
 
-;; read target boost map
+// read target boost map
 0xa8d mov  r0,#$43
 0xa8f mov  r1,#$44
 0xa91 clr  f1
@@ -2444,9 +1228,9 @@
 0xa9a mov  r1,#$51
 0xa9c mov  @r1,a
 0xa9d ret
-;; END read target boost map
+// END read target boost map
 
-;; calculate ADC angles 1 & 2
+// calculate ADC angles 1 & 2
 0xa9e mov  r0,#$2A
 0xaa0 mov  r1,#$22
 0xaa2 call $0380
@@ -2457,92 +1241,13 @@
 0xaaa add  a,#$F8
 0xaac mov  @r1,a
 0xaad ret
-;; END calculate ADC angles
+// END calculate ADC angles
 
-0xaae nop
-0xaaf nop
-0xab0 nop
-0xab1 nop
-0xab2 nop
-0xab3 nop
-0xab4 nop
-0xab5 nop
-0xab6 nop
-0xab7 nop
-0xab8 nop
-0xab9 nop
-0xaba nop
-0xabb nop
-0xabc nop
-0xabd nop
-0xabe nop
-0xabf nop
-0xac0 nop
-0xac1 nop
-0xac2 nop
-0xac3 nop
-0xac4 nop
-0xac5 nop
-0xac6 nop
-0xac7 nop
-0xac8 nop
-0xac9 nop
-0xaca nop
-0xacb nop
-0xacc nop
-0xacd nop
-0xace nop
-0xacf nop
-0xad0 nop
-0xad1 nop
-0xad2 nop
-0xad3 nop
-0xad4 nop
-0xad5 nop
-0xad6 nop
-0xad7 nop
-0xad8 nop
-0xad9 nop
-0xada nop
-0xadb nop
-0xadc nop
-0xadd nop
-0xade nop
-0xadf nop
-0xae0 nop
-0xae1 nop
-0xae2 nop
-0xae3 nop
-0xae4 nop
-0xae5 nop
-0xae6 nop
-0xae7 nop
-0xae8 nop
-0xae9 nop
-0xaea nop
-0xaeb nop
-0xaec nop
-0xaed nop
-0xaee nop
-0xaef nop
-0xaf0 nop
-0xaf1 nop
-0xaf2 nop
-0xaf3 nop
-0xaf4 nop
-0xaf5 nop
-0xaf6 nop
-0xaf7 nop
-0xaf8 nop
-0xaf9 nop
-0xafa nop
-0xafb nop
-0xafc nop
-0xafd nop
+// BIG GAP
 0xafe movp a,@a
 0xaff ret
 
-;; CV feedforward aka open-loop map (rpm/throttle)
+// CV feedforward aka open-loop map (rpm/throttle)
 0xb00 .db   0x26
 0xb01 .db   0x26
 0xb02 .db   0x26
@@ -2671,9 +1376,9 @@
 0xb7d .db   0xBF
 0xb7e .db   0xBF
 0xb7f .db   0xBF
-;; END CV feedforward map
+// END CV feedforward map
 
-;; multiply @r0 by RPM value
+// multiply @r0 by RPM value
 0xb80 mov  a,@r0
 0xb81 mov  r3,a
 0xb82 mov  r0,#$24
@@ -2684,124 +1389,14 @@
 0xb89 sel  mb1
 0xb8a ret
 0xb8b jmp  $04FE
-;; END multiply @r0 by RPM
+// END multiply @r0 by RPM
 
-0xb8d nop
-0xb8e nop
-0xb8f nop
-0xb90 nop
-0xb91 nop
-0xb92 nop
-0xb93 nop
-0xb94 nop
-0xb95 nop
-0xb96 nop
-0xb97 nop
-0xb98 nop
-0xb99 nop
-0xb9a nop
-0xb9b nop
-0xb9c nop
-0xb9d nop
-0xb9e nop
-0xb9f nop
-0xba0 nop
-0xba1 nop
-0xba2 nop
-0xba3 nop
-0xba4 nop
-0xba5 nop
-0xba6 nop
-0xba7 nop
-0xba8 nop
-0xba9 nop
-0xbaa nop
-0xbab nop
-0xbac nop
-0xbad nop
-0xbae nop
-0xbaf nop
-0xbb0 nop
-0xbb1 nop
-0xbb2 nop
-0xbb3 nop
-0xbb4 nop
-0xbb5 nop
-0xbb6 nop
-0xbb7 nop
-0xbb8 nop
-0xbb9 nop
-0xbba nop
-0xbbb nop
-0xbbc nop
-0xbbd nop
-0xbbe nop
-0xbbf nop
-0xbc0 nop
-0xbc1 nop
-0xbc2 nop
-0xbc3 nop
-0xbc4 nop
-0xbc5 nop
-0xbc6 nop
-0xbc7 nop
-0xbc8 nop
-0xbc9 nop
-0xbca nop
-0xbcb nop
-0xbcc nop
-0xbcd nop
-0xbce nop
-0xbcf nop
-0xbd0 nop
-0xbd1 nop
-0xbd2 nop
-0xbd3 nop
-0xbd4 nop
-0xbd5 nop
-0xbd6 nop
-0xbd7 nop
-0xbd8 nop
-0xbd9 nop
-0xbda nop
-0xbdb nop
-0xbdc nop
-0xbdd nop
-0xbde nop
-0xbdf nop
-0xbe0 nop
-0xbe1 nop
-0xbe2 nop
-0xbe3 nop
-0xbe4 nop
-0xbe5 nop
-0xbe6 nop
-0xbe7 nop
-0xbe8 nop
-0xbe9 nop
-0xbea nop
-0xbeb nop
-0xbec nop
-0xbed nop
-0xbee nop
-0xbef nop
-0xbf0 nop
-0xbf1 nop
-0xbf2 nop
-0xbf3 nop
-0xbf4 nop
-0xbf5 nop
-0xbf6 nop
-0xbf7 nop
-0xbf8 nop
-0xbf9 nop
-0xbfa nop
-0xbfb nop
+// BIG GAP
 0xbfc jf1  $0B8B
 0xbfe movp a,@a
 0xbff ret
 
-;; target boost map (rpm/throttle)
+// target boost map (rpm/throttle)
 0xc00 .db 0x98
 0xc01 .db 0x98
 0xc02 .db 0x98
@@ -2931,18 +1526,18 @@
 0xc7e .db 0x98
 0xc7f .db 0x91
 
-;; 0xc80 mov  a,@r1
-;; END target boost map
+// 0xc80 mov  a,@r1
+// END target boost map
 
-;; This must be incorrectly disassembled because 480 (C80) is called
-;; as the routine
-;; In any case this is where we call to from A82
-;; r0 = 43h
-;; r1 = 44h
-;; read boost/cv feedforward map
-0xc80 mov  a,@r1;added my me to fix the above mistake
+// This must be incorrectly disassembled because 480 (C80) is called
+// as the routine
+// In any case this is where we call to from A82
+// r0 = 43h
+// r1 = 44h
+// read boost/cv feedforward map
+0xc80 mov  a,@r1 // added my me to fix the above mistake
 0xc81 rrc  a
-0xc82 rrc  a;divide 43h by 4 to get 0-7 range
+0xc82 rrc  a // divide 43h by 4 to get 0-7 range
 0xc83 anl  a,#$F
 0xc85 mov  r2,a
 0xc86 mov  a,@r0
@@ -3006,53 +1601,13 @@
 0xcd2 xchd a,@r0
 0xcd3 swap a
 0xcd4 ret
-;; END read boost/cv feedforward map
+// END read boost/cv feedforward map
 
-0xcd5 nop
-0xcd6 nop
-0xcd7 nop
-0xcd8 nop
-0xcd9 nop
-0xcda nop
-0xcdb nop
-0xcdc nop
-0xcdd nop
-0xcde nop
-0xcdf nop
-0xce0 nop
-0xce1 nop
-0xce2 nop
-0xce3 nop
-0xce4 nop
-0xce5 nop
-0xce6 nop
-0xce7 nop
-0xce8 nop
-0xce9 nop
-0xcea nop
-0xceb nop
-0xcec nop
-0xced nop
-0xcee nop
-0xcef nop
-0xcf0 nop
-0xcf1 nop
-0xcf2 nop
-0xcf3 nop
-0xcf4 nop
-0xcf5 nop
-0xcf6 nop
-0xcf7 nop
-0xcf8 nop
-0xcf9 nop
-0xcfa nop
-0xcfb nop
-0xcfc nop
-0xcfd nop
+// BIG GAP
 0xcfe movp a,@a
 0xcff ret
 
-;; Detect knock
+// Detect knock
 0xd00 mov  r0,#$7A
 0xd02 mov  r1,#$45
 0xd04 mov  a,@r1
@@ -3063,15 +1618,15 @@
 0xd0a mov  @r0,a
 0xd0b mov  r1,#$47
 0xd0d mov  r2,#$0
-;; The upper nibble of 47h represents 0-4 in steps of 0.25. The value in 7Ah is multipled by this; the values depend on rpm:
-;; low-medium: 66  (x1), medium-high: 55 (x0.75), high: 44 (x0.5). The final value is the threshold; the current reading must be *lower* than the threshold to count as knock; therefore this coefficient makes knock detection *less* sensitive at high rpm.
+// The upper nibble of 47h represents 0-4 in steps of 0.25. The value in 7Ah is multipled by this // the values depend on rpm:
+// low-medium: 66  (x1), medium-high: 55 (x0.75), high: 44 (x0.5). The final value is the threshold // the current reading must be *lower* than the threshold to count as knock // therefore this coefficient makes knock detection *less* sensitive at high rpm.
 0xd0f mov  a,@r0
 0xd10 mov  r0,a
 0xd11 mov  r4,a
 0xd12 rlc  a
-0xd13 call $07C1;0xFC1
+0xd13 call $07C1 // 0xFC1
 0xd15 call $07C1
-0xd17 call $07BD;0xFDB
+0xd17 call $07BD // 0xFDB
 0xd19 call $07BD
 0xd1b mov  a,@r1
 0xd1c swap a
@@ -3205,9 +1760,9 @@
 0xdda clr  f0
 0xddb cpl  f0
 0xddc jmp  $0600
-;; END detect knock
+// END detect knock
 
-;; filter target boost
+// filter target boost
 0xdde mov  a,@r0
 0xddf anl  a,#$3
 0xde1 add  a,#$1
@@ -3226,7 +1781,7 @@
 0xdf5 xch  a,r3
 0xdf6 mov  @r0,a
 0xdf7 ret
-;; END filter target boost
+// END filter target boost
 
 0xdf8 nop
 0xdf9 nop
@@ -3237,15 +1792,15 @@
 0xdfe movp a,@a
 0xdff ret
 
-;; select PID function
+// select PID function
 0xe00 jb4  $0E82
 0xe02 jb3  $0E30
 0xe04 nop
 0xe05 nop
 0xe06 jmp  $05DE
-;; END select PID function
+// END select PID function
 
-;; exponential smoothing function
+// exponential smoothing function
 0xe08 mov  a,r7
 0xe09 mov  r4,a
 0xe0a mov  a,@r0
@@ -3281,9 +1836,9 @@
 0xe2d mov  a,r4
 0xe2e addc a,r2
 0xe2f ret
-;; END exponential smoothing function
+// END exponential smoothing function
 
-;; PID derivative function. Location 52h contains actual boost and 51h contains target boost (from the map read routine). Here they are compared for the error value. At 0xe38, carry is set if actual boost was higher than target, i.e. overboost.
+// PID derivative function. Location 52h contains actual boost and 51h contains target boost (from the map read routine). Here they are compared for the error value. At 0xe38, carry is set if actual boost was higher than target, i.e. overboost.
 0xe30 mov  r1,#$52
 0xe32 mov  a,@r1
 0xe33 cpl  a
@@ -3342,9 +1897,9 @@
 0xe7c jmp  $05F1
 0xe7e mov  a,#$7F
 0xe80 jmp  $0673
-;; END PID derivative function
+// END PID derivative function
 
-;; PID proportional/integral function
+// PID proportional/integral function
 0xe82 jb3  $0EF6
 0xe84 mov  r1,#$52
 0xe86 mov  a,@r1
@@ -3430,7 +1985,7 @@
 0xef3 mov  @r0,#$7F
 0xef5 ret
 0xef6 jmp  $0700
-;; END PID proportional/integral function
+// END PID proportional/integral function
 
 0xef8 nop
 0xef9 nop
@@ -3441,7 +1996,7 @@
 0xefe movp a,@a
 0xeff ret
 
-;; final CV output calculation
+// final CV output calculation
 0xf00 mov  r1,#$63
 0xf02 mov  a,@r1
 0xf03 mov  r6,a
@@ -3508,10 +2063,10 @@
 0xf5c mov  r1,#$4B
 0xf5e mov  a,@r1
 0xf5f mov  r2,a
-0xf60 mov  r1,#$33;33h is current blink code
+0xf60 mov  r1,#$33 // 33h is current blink code
 0xf62 mov  a,@r1
 0xf63 jz   $0F69
-0xf65 add  a,#$EF;EFh+11h=0
+0xf65 add  a,#$EF // EFh+11h=0
 0xf67 jnz  $0F81
 0xf69 mov  a,r4
 0xf6a mov  @r0,a
@@ -3527,12 +2082,12 @@
 0xf77 mov  r1,#$33
 0xf79 mov  a,@r1
 0xf7a jnz  $0F7E
-0xf7c mov  @r1,#$11;33h <- 11 (blink code 1-1)
+0xf7c mov  @r1,#$11 // 33h <- 11 (blink code 1-1)
 0xf7e djnz r4,$0F6F
 0xf80 ret
-;; END cv final output calculation
+// END cv final output calculation
 
-;; limp mode function
+// limp mode function
 0xf81 clr  a
 0xf82 mov  r3,#$10
 0xf84 mov  r1,#$57
@@ -3548,9 +2103,9 @@
 0xf94 mov  @r1,a
 0xf95 clr  a
 0xf96 jmp  $076A
-;; END limp mode function
+// END limp mode function
 
-;; count cycles for cylinders
+// count cycles for cylinders
 0xf98 inc  @r1
 0xf99 mov  a,@r1
 0xf9a jnz  $0FA1
@@ -3565,9 +2120,9 @@
 0xfa5 jz   $0FA8
 0xfa7 dec  a
 0xfa8 ret
-;; end count cycles
+// end count cycles
 
-;; call exp. smoothing and rotate 16-bit values
+// call exp. smoothing and rotate 16-bit values
 0xfa9 call $0608
 0xfab call $07B0
 0xfad call $07B0
@@ -3606,39 +2161,18 @@
 0xfd1 mov  r3,a
 0xfd2 djnz r7,$0FCB
 0xfd4 ret
-;; end call exp. smoothing/rotate values
+// end call exp. smoothing/rotate values
 
-;; prep CV output
+// prep CV output
 0xfd5 mov  r0,#$41
 0xfd7 mov  a,r4
 0xfd8 add  a,#$40
 0xfda jnc  $0FDE
 0xfdc mov  r4,#$BF
 0xfde ret
-;; end prep CV output
+// end prep CV output
 
-0xfdf nop
-0xfe0 nop
-0xfe1 nop
-0xfe2 nop
-0xfe3 nop
-0xfe4 nop
-0xfe5 nop
-0xfe6 nop
-0xfe7 nop
-0xfe8 nop
-0xfe9 nop
-0xfea nop
-0xfeb nop
-0xfec nop
-0xfed nop
-0xfee nop
-0xfef nop
-0xff0 nop
-0xff1 nop
-0xff2 nop
-0xff3 nop
-0xff4 nop
+// BIG GAP
 0xff5 jb1  $0F32
 0xff7 jb1  $0F43
 0xff9 orl  a,#$43
