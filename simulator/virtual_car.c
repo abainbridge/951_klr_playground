@@ -65,6 +65,11 @@ void cpu_port2_write(cpu_t *cpu, u8 val) {
         graph_add_point(FROM_KLR_BLINK_CODE, cpu->master_clk, get_graph_val_from_bit_n(cpu->p2, 4));
         graph_add_point(FROM_KLR_BLINK_CODE, cpu->master_clk, get_graph_val_from_bit_n(val, 4));
     }
+    if (changes & 0x80) {
+        // Ignition output changed
+        graph_add_point(FROM_KLR_IGNITION, cpu->master_clk, get_graph_val_from_bit_n(cpu->p2, 7));
+        graph_add_point(FROM_KLR_IGNITION, cpu->master_clk, get_graph_val_from_bit_n(val, 7));
+    }
 }
 
 u8 cpu_external_mem_read(cpu_t *cpu, u8 addr) {
