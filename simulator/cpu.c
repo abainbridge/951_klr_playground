@@ -69,6 +69,12 @@ enum flag_bits {
     B_FLAG = 0x10
 };
 
+// The MCU in this project has 128 bytes of RAM but the CPU core internals
+// support 256 bytes. This mask makes the modelled RAM accesses ignore the
+// top bit of the address, as the real hardware would.
+enum { RAM_ADDR_MASK = 0x7f };
+
+
 // r0-r7 map to memory via reg_ptr
 #define R0 m.reg_ptr[0]
 #define R1 m.reg_ptr[1]
@@ -92,8 +98,8 @@ static cpu_t m;
 // ****************************************************************************
 
 static u8 rom_read(u16 a) { return m.rom[a]; }
-static u8 ram_read(u16 a) { return m.ram[a]; }
-static void ram_write(u16 a, u8 v) { m.ram[a] = v; }
+static u8 ram_read(u16 a) { return m.ram[a & RAM_ADDR_MASK]; }
+static void ram_write(u16 a, u8 v) { m.ram[a & RAM_ADDR_MASK] = v; }
 static u8 ext_mem_read(u8 a) { return cpu_external_mem_read(&m, a); }
 static void ext_mem_write(u16 a, u8 v) { }
 static void port1_write(u8 v) { cpu_port1_write(&m, v); m.p1 = v; }
