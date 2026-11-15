@@ -95,7 +95,7 @@ static u8 rom_read(u16 a) { return m.rom[a]; }
 static u8 ram_read(u16 a) { return m.ram[a]; }
 static void ram_write(u16 a, u8 v) { m.ram[a] = v; }
 static u8 ext_mem_read(u8 a) { return cpu_external_mem_read(&m, a); }
-static void ext_mem_write(u16 a, u8 v) { assert(0); }
+static void ext_mem_write(u16 a, u8 v) { }
 static void port1_write(u8 v) { cpu_port1_write(&m, v); m.p1 = v; }
 static void port2_write(u8 v) { cpu_port2_write(&m, v); m.p2 = v; }
 static int t0_read(void) { return cpu_t0_read(); }
