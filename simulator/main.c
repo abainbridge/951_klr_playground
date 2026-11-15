@@ -123,7 +123,7 @@ int main() {
         
         BitmapClear(g_window->bmp, g_colourWhite);
         DrawTextRight(g_defaultFont, g_colourBlack, g_window->bmp,
-            g_window->bmp->width, g_defaultFont->charHeight * 1.65, "Sim Speed:%.5f ", sim_speed);
+            g_window->bmp->width, g_defaultFont->charHeight * 2.92, "Sim Speed:%.5f ", sim_speed);
 
         int y = 0;
         vc_draw_state(0, y);
