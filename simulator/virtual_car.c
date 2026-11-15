@@ -78,21 +78,21 @@ u8 cpu_external_mem_read(cpu_t *cpu, u8 addr) {
 
     switch (g_adc_latched_address) {
     case 0: // Knock sensor noise level
-        return 0;
+        return 120;
     case 1: // Battery voltage
         return 200;
     case 2: // ?
         return 0;
     case 3: // Throttle position sensor supply voltage
-        return 40;
+        return 200;
     case 4: // Manifold air pressure
-        return g_virtual_car.manifold_pressure * 127;
+        return g_virtual_car.manifold_pressure * 100;
     case 5: // Knock sensor integrator
-        return 0;
+        return 2;
     case 6: // 6 kOhm to ground
         return 0;
     case 7: // Throttle position sensor angle
-        return g_virtual_car.throttle_pos * 255;
+        return 20 + g_virtual_car.throttle_pos * 175;
     }
 
     return 0;
