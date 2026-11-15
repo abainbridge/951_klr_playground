@@ -11,7 +11,8 @@ typedef struct {
     double manifold_pressure;   // In bar
     double engine_power;        // In BHP
 
-    double advance_period_residual; // In seconds
+    double advance_period_residual; // In seconds. Accumulated error in physics modeling time.
+    double crank_angle_residual; // In degrees. Accumulated error in crank angle advance.
 } VirtualCar;
 
 extern VirtualCar g_virtual_car;

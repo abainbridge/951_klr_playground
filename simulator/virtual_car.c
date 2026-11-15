@@ -108,6 +108,7 @@ void vc_init() {
     g_virtual_car.engine_power = 0;
 
     g_virtual_car.advance_period_residual = 0;
+    g_virtual_car.crank_angle_residual = 0;
 }
 
 #define DRAW_TEXT(x, y, msg, ...) \
@@ -160,7 +161,7 @@ void signal_dwell_end() {
     graph_add_point(TO_KLR_IGNTION, cpu->master_clk, 0);
 }
 
-void vc_advance(double advance_period_seconds) {
+void vc_advance(double advance_period_requested) {
     VirtualCar *car = &g_virtual_car;
 
     // 
@@ -171,10 +172,13 @@ void vc_advance(double advance_period_seconds) {
         }
     }
 
-    // Run car+engine physics
-    double advance_period = advance_period_seconds + car->advance_period_residual;
+
+    //
+    // Run car + engine physics (but don't increment crank angle - that will be done below)
+
     double step_period = 0.01;
-    for (; advance_period > step_period; advance_period -= step_period) {
+    unsigned num_time_steps = (advance_period_requested + car->advance_period_residual) / step_period;
+    for (unsigned i = 0; i < num_time_steps; i++) {
         double pressure_from_turbo = car->turbo_rpm * car->turbo_rpm;
         pressure_from_turbo /= (MAX_TURBO_RPM * MAX_TURBO_RPM);
         pressure_from_turbo += 1.0;
@@ -182,8 +186,8 @@ void vc_advance(double advance_period_seconds) {
             pressure_from_turbo = 2.0;
 
         car->manifold_pressure = pressure_from_turbo * sqrtf(car->throttle_pos);
-        car->engine_power = (car->engine_rpm / MAX_ENGINE_RPM) * 
-                            car->manifold_pressure * 110.0;
+        car->engine_power = (car->engine_rpm / MAX_ENGINE_RPM) *
+            car->manifold_pressure * 110.0;
 
         double turbo_increment = car->engine_power * 5000.0;
         car->turbo_rpm += turbo_increment * step_period;
@@ -198,9 +202,15 @@ void vc_advance(double advance_period_seconds) {
             car->engine_rpm = MAX_ENGINE_RPM;
         }
     }
-    car->advance_period_residual = advance_period;
 
-    // This function, vc_advance() is passed different values of 
+    double advance_period = num_time_steps * step_period;
+    car->advance_period_residual += advance_period_requested - advance_period;
+
+
+    //
+    // Simulate CPU cycles and crank rotation
+
+    // This function is passed different values of 
     // advance_period_seconds, depending on whether the simulation
     // is running in real time, or slowed down. In real time,
     // advance_period_seconds will be about 16ms (assuming the program's
@@ -208,75 +218,93 @@ void vc_advance(double advance_period_seconds) {
     // running slowed down by a factor of a million, then 
     // advance_period_seconds will be 16ns. In this case, we only
     // execute a single instruction once every ~50 calls. We need
-    // to cope with this extremes.
-
-    // If a reset or ignition interrupt signal that we generate occurs
-    // during this advance period. If so, we should execute instructions
-    // until it is time to send the signal, send it, then resume executing
-    // instructions. That way the CPU simulation will see our signals at
-    // exactly the right time.
+    // to cope with these extremes.
+    //
+    // We will keep car->crank_angle in the range -90 to +90 degrees, since
+    // this is the convenient range for all the events concerning a single
+    // cylinder ignition.
+    //
+    // Each time through the loop below, wSime simulate as many CPU cycles as possible
+    // before an event happens (reset, or dwell start/end, or if we've got to +90
+    // of crank angle).
     // 
     // At 850 RPM, the time between ignition events is 35ms.
     // At 6500 RPM, the time between ignition events is 4.6ms.
 
     double engine_speed_degrees_per_second = (car->engine_rpm / 60.0) * 360.0;
-    double advance_period_cycles = advance_period_seconds * CPU_CLOCK_RATE_HZ;
-    double target_crank_angle = car->crank_angle + engine_speed_degrees_per_second * advance_period_seconds;
+    double engine_speed_degrees_per_cycle = engine_speed_degrees_per_second * CPU_CLOCK_PERIOD;
+    int advance_period_cycles = advance_period_requested * CPU_CLOCK_RATE_HZ;
+    double target_crank_angle = car->crank_angle + engine_speed_degrees_per_second * advance_period_requested + 
+        car->crank_angle_residual;
+
+    if (target_crank_angle < car->crank_angle)
+        target_crank_angle = target_crank_angle;
+
     for (int cycle = 0; cycle < advance_period_cycles;) {
         // There are four crank angles that require us to end a block of CPU execution:
         // * -80 degrees: Reset the CPU
-        // * -33 degrees: Start of ignition dwell period (coil starts charging up)
-        // * -30 degrees: End of ignition dwell period (spark fires)
+        // * -33 degrees: DME sets ignition line high (start of its idea of coil dwell period)
+        // * -30 degrees: DME sets ignition line low (end of its idea of coil dwell period)
         // * +90 degrees: End of cycle for this cylinder. Move to next cylinder.
         //
-        // Notes:
-        // 1. The start of the dwell period varies by +/- 10 degrees depending on RPM and load.
-        // 2. The dwell period should be 3ms, not a constant amount of crank rotation.
-        // 3. There's no requirement to end the block of CPU execution when we reach +80
-        //    degrees, but it makes the logic simpler.
+        // Inputs from DME that we model slightly wrongly:
+        // 1. The start of the dwell period should vary depending on RPM and load.
+        // 2. The dwell period should be ~3ms, not a constant amount of crank rotation.
 
         if (car->crank_angle < -80.0 && target_crank_angle > -80.0) {
             // Need to generate a reset
             double degrees_until_reset = -80.0 - car->crank_angle;
-            int cycles_until_reset = CPU_CLOCK_RATE_HZ * degrees_until_reset /
-                engine_speed_degrees_per_second;
+            int cycles_until_reset = ceil(degrees_until_reset / engine_speed_degrees_per_cycle);
+            // Note: used ceil() here to guarantee that crank_angle will be incremented to
+            // more than -80.0. If it was just truncated, we'd increment it to some tiny amount
+            // less than -80, meaning that next time around the for loop we'd come here again
+            // and wrongly do another reset.
             cpu_execute(cycles_until_reset);
             cycle += cycles_until_reset;
-            car->crank_angle = -80.0;
+            car->crank_angle += cycles_until_reset * engine_speed_degrees_per_cycle;
             signal_reset();
         }
         else if (car->crank_angle < -33.0 && target_crank_angle > -33.0) {
             // Need to signal start of dwell period
             double degrees_until_dwell_start = -33.0 - car->crank_angle;
-            int cycles_until_dwell_start = CPU_CLOCK_RATE_HZ * degrees_until_dwell_start /
-                engine_speed_degrees_per_second;
+            int cycles_until_dwell_start = ceil(degrees_until_dwell_start / engine_speed_degrees_per_cycle);
             cpu_execute(cycles_until_dwell_start);
             cycle += cycles_until_dwell_start;
-            car->crank_angle = -33.0;
+            car->crank_angle += cycles_until_dwell_start * engine_speed_degrees_per_cycle;
             signal_dwell_start();
         }
         else if (car->crank_angle < -30.0 && target_crank_angle > -30.0) {
             // Need to signal end of dwell period
             double degrees_until_dwell_end = -30.0 - car->crank_angle;
-            int cycles_until_dwell_end = CPU_CLOCK_RATE_HZ * degrees_until_dwell_end /
-                engine_speed_degrees_per_second;
+            int cycles_until_dwell_end = ceil(degrees_until_dwell_end / engine_speed_degrees_per_cycle);
             cpu_execute(cycles_until_dwell_end);
             cycle += cycles_until_dwell_end;
-            car->crank_angle = -30.0;
+            car->crank_angle += cycles_until_dwell_end * engine_speed_degrees_per_cycle;
             signal_dwell_end();
         }
-        else if (car->crank_angle < 90.0 && target_crank_angle > 90.0) {
+        else if (target_crank_angle > 90.0) {
+            // Need to wrap crank angle back to -90
             double degrees_until_90 = 90.0 - car->crank_angle;
-            int cycles_until_80 = CPU_CLOCK_RATE_HZ * degrees_until_90 / engine_speed_degrees_per_second;
-            cpu_execute(cycles_until_80);
-            cycle += cycles_until_80;
-            car->crank_angle = -90.0;
-            target_crank_angle -= degrees_until_90 + 180.0;
+            int cycles_until_90 = ceil(degrees_until_90 / engine_speed_degrees_per_cycle);
+            cpu_execute(cycles_until_90);
+            cycle += cycles_until_90;
+            car->crank_angle += cycles_until_90 * engine_speed_degrees_per_cycle;
+            car->crank_angle -= 180.0;
+            target_crank_angle -= 180.0;
         }
         else {
-            cpu_execute(advance_period_cycles);
-            car->crank_angle = target_crank_angle;
-            break;
+            // No events needed - do all the requested cycles.
+            double degrees_until_end = target_crank_angle - car->crank_angle;
+            // Not using ceil() here because rounding up could be bad. For example, imagine
+            // target_crank_angle was -33.01 degrees and engine_speed_degrees_per_cycle was 
+            // 0.02, then we might end up setting crank_angle to -32.99 and thus would skip
+            // the "signal start of dwell period" code on the next iteration of the for loop.
+            int cycles_until_end = degrees_until_end / engine_speed_degrees_per_cycle;
+            cpu_execute(cycles_until_end);
+            cycle += cycles_until_end;
+            car->crank_angle += cycles_until_end * engine_speed_degrees_per_cycle;
         }
     }
+
+    car->crank_angle_residual = target_crank_angle - car->crank_angle;
 }
