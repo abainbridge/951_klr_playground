@@ -124,7 +124,7 @@ u8 cpu_external_mem_read(cpu_t *cpu, u8 addr) {
     case 4: // Manifold air pressure
         return g_virtual_car.manifold_pressure * 100;
     case 5: // Knock sensor integrator
-        return 2;
+        return 250; // A quiet value. Change to smaller number to simulate knock.
     case 6: // 6 kOhm to ground
         return 0;
     case 7: // Throttle position sensor angle
