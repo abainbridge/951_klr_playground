@@ -114,7 +114,7 @@ u8 cpu_external_mem_read(cpu_t *cpu, u8 addr) {
 
     switch (g_adc_latched_address) {
     case 0: // Knock sensor noise level
-        return 120;
+        return 60;
     case 1: // Battery voltage
         return 200;
     case 2: // ?
