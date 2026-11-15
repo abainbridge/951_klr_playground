@@ -238,14 +238,18 @@ void vc_advance(double advance_period_requested) {
 
     double engine_speed_degrees_per_second = (car->engine_rpm / 60.0) * 360.0;
     double engine_speed_degrees_per_cycle = engine_speed_degrees_per_second * CPU_CLOCK_PERIOD;
-    int advance_period_cycles = advance_period_requested * CPU_CLOCK_RATE_HZ;
     double target_crank_angle = car->crank_angle + engine_speed_degrees_per_second * advance_period_requested + 
         car->crank_angle_residual;
 
     if (target_crank_angle < car->crank_angle)
         target_crank_angle = target_crank_angle;
 
-    for (int cycle = 0; cycle < advance_period_cycles;) {
+    // The loop runs until the crank has reached target_crank_angle, to within
+    // one CPU cycle's worth of rotation. Anything left over is carried to the
+    // next call in crank_angle_residual. That also covers the case where this
+    // call is asked to advance by less than one CPU cycle: the residual builds
+    // up over several calls until there is enough for one cycle.
+    for (;;) {
         // There are four crank angles that require us to end a block of CPU execution:
         // * -80 degrees: Reset the CPU
         // * -33 degrees: DME sets ignition line high (start of its idea of coil dwell period)
@@ -265,7 +269,6 @@ void vc_advance(double advance_period_requested) {
             // less than -80, meaning that next time around the for loop we'd come here again
             // and wrongly do another reset.
             cpu_execute(cycles_until_reset);
-            cycle += cycles_until_reset;
             car->crank_angle += cycles_until_reset * engine_speed_degrees_per_cycle;
             signal_reset();
         }
@@ -274,7 +277,6 @@ void vc_advance(double advance_period_requested) {
             double degrees_until_dwell_start = -33.0 - car->crank_angle;
             int cycles_until_dwell_start = ceil(degrees_until_dwell_start / engine_speed_degrees_per_cycle);
             cpu_execute(cycles_until_dwell_start);
-            cycle += cycles_until_dwell_start;
             car->crank_angle += cycles_until_dwell_start * engine_speed_degrees_per_cycle;
             signal_dwell_start();
         }
@@ -283,7 +285,6 @@ void vc_advance(double advance_period_requested) {
             double degrees_until_dwell_end = -30.0 - car->crank_angle;
             int cycles_until_dwell_end = ceil(degrees_until_dwell_end / engine_speed_degrees_per_cycle);
             cpu_execute(cycles_until_dwell_end);
-            cycle += cycles_until_dwell_end;
             car->crank_angle += cycles_until_dwell_end * engine_speed_degrees_per_cycle;
             signal_dwell_end();
         }
@@ -292,7 +293,6 @@ void vc_advance(double advance_period_requested) {
             double degrees_until_90 = 90.0 - car->crank_angle;
             int cycles_until_90 = ceil(degrees_until_90 / engine_speed_degrees_per_cycle);
             cpu_execute(cycles_until_90);
-            cycle += cycles_until_90;
             car->crank_angle += cycles_until_90 * engine_speed_degrees_per_cycle;
             car->crank_angle -= 180.0;
             target_crank_angle -= 180.0;
@@ -305,9 +305,14 @@ void vc_advance(double advance_period_requested) {
             // 0.02, then we might end up setting crank_angle to -32.99 and thus would skip
             // the "signal start of dwell period" code on the next iteration of the for loop.
             int cycles_until_end = degrees_until_end / engine_speed_degrees_per_cycle;
-            cpu_execute(cycles_until_end);
-            cycle += cycles_until_end;
-            car->crank_angle += cycles_until_end * engine_speed_degrees_per_cycle;
+            // cycles_until_end can be zero, or negative if the ceil() at an
+            // event above carried the crank slightly past the target. Either
+            // way there is nothing more to do in this call.
+            if (cycles_until_end > 0) {
+                cpu_execute(cycles_until_end);
+                car->crank_angle += cycles_until_end * engine_speed_degrees_per_cycle;
+            }
+            break;
         }
     }
 
