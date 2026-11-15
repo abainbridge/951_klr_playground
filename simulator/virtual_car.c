@@ -235,9 +235,9 @@ void vc_advance(double advance_period_requested) {
         if (pressure_from_turbo > 2.0)
             pressure_from_turbo = 2.0;
 
-        car->manifold_pressure = pressure_from_turbo * sqrtf(car->throttle_pos);
+        car->manifold_pressure = pressure_from_turbo * sqrtf(car->throttle_pos) * 0.7 + 0.3;
         car->engine_power = (car->engine_rpm / MAX_ENGINE_RPM) *
-            car->manifold_pressure * 110.0;
+            (car->manifold_pressure - 0.3) * 110.0;
 
         double turbo_increment = car->engine_power * 5000.0;
         car->turbo_rpm += turbo_increment * step_period;
