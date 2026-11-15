@@ -655,7 +655,7 @@ void cpu_execute(int num_cycles) {
             m.pc = m.pc;   // breakpoint this line to implement
 						   // a breakpoint on the simulated CPU.
 
-        memcpy(m.pc_history, m.pc_history + 1, sizeof(m.pc_history) - 2);
+        memmove(m.pc_history, m.pc_history + 1, sizeof(m.pc_history) - 2);
         m.pc_history[PC_HISTORY_LEN - 1] = m.pc;
 #endif
 
