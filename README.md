@@ -1,7 +1,14 @@
 # 951_klr_playground
-Some useless stuff for the Porsche 944 Turbo KLR ECU. The purpose is mainly to force me to learn the things jhnbyrn wrote about the system. See https://jhnbyrn.github.io/951-KLR-PAGES/
 
-The Annotated_Stock1987_951KLR.asm file is copied from https://jhnbyrn.github.io/951-KLR-PAGES
+Some useless stuff for the Porsche 944 Turbo KLR ECU. The purpose is mainly to
+force me to learn the things jhnbyrn wrote about the system. See
+https://jhnbyrn.github.io/951-KLR-PAGES/
+
+The most interesting thing is a simulator capable of running the firmware in
+original KLR ROM image. See simulator/README.md for details.
+
+The Annotated_Stock1987_951KLR.asm file is copied from
+https://jhnbyrn.github.io/951-KLR-PAGES
 
 ## KLR wiring loom connections and electronics
 
