@@ -419,3 +419,4 @@ FodyWeavers.xsd
 /opendme-code-r137-trunk
 /out.bin
 /opendme
+/simulator/build/deadfrog-lib/*
