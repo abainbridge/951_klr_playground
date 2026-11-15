@@ -10,6 +10,7 @@ typedef struct {
     double turbo_rpm;
     double manifold_pressure;   // In bar
     double engine_power;        // In BHP
+    double dwell_start_angle;   // In degrees after TDC. Range is -90 to 90. Gets reset for every cylinder firing.
 
     double advance_period_residual; // In seconds. Accumulated error in physics modeling time.
     double crank_angle_residual; // In degrees. Accumulated error in crank angle advance.

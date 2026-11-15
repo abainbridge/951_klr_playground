@@ -17,6 +17,37 @@ static double const MIN_ENGINE_RPM = 850;
 static double const MAX_ENGINE_RPM = 6500;
 static double const MAX_TURBO_RPM = 200000;
 
+// Crank angles, in degrees after TDC, of the two fixed events in each
+// cylinder's cycle.
+static double const RESET_ANGLE = -80.0;    // DME pulses the KLR's reset line (the "trigger" signal).
+static double const SPARK_ANGLE = -30.0;    // DME ends the dwell period. Should really vary with RPM and load.
+
+
+// The DME charges the coil for a roughly constant time before each spark. Its
+// real dwell map (map 61 in the DME EPROM) also depends on battery voltage and
+// is longer below 2000 RPM, but at 14V it is about 3.7ms from 2000 RPM up, so
+// we just use that everywhere. The DME never uses more than 144.5 degrees of
+// crank rotation for dwell, which limits the time above about 6500 RPM.
+static double const DWELL_SECONDS = 0.0037;
+static double const MAX_DWELL_DEGREES = 144.5;
+
+// Works out the crank angle at which the DME will start the dwell period for
+// the next spark, wrapped into the -90 to 90 range that crank_angle uses.
+// At high RPM the dwell is longer than the 60 degrees between -90 and the
+// spark, so it starts during the previous cylinder's cycle. In that case the
+// angle returned is after that cylinder's spark.
+static double get_next_dwell_start_angle(double rpm) {
+    double degrees_per_second = (rpm / 60.0) * 360.0;
+    double dwell_degrees = degrees_per_second * DWELL_SECONDS;
+    if (dwell_degrees > MAX_DWELL_DEGREES)
+        dwell_degrees = MAX_DWELL_DEGREES;
+
+    double angle = SPARK_ANGLE - dwell_degrees;
+    if (angle < -90.0)
+        angle += 180.0;
+    return angle;
+}
+
 
 unsigned g_adc_latched_address;
 unsigned g_adc_latch_cycle;
@@ -111,6 +142,7 @@ void vc_init() {
     g_virtual_car.turbo_rpm = 0;
     g_virtual_car.manifold_pressure = 0;
     g_virtual_car.engine_power = 0;
+    g_virtual_car.dwell_start_angle = get_next_dwell_start_angle(g_virtual_car.engine_rpm);
 
     g_virtual_car.advance_period_residual = 0;
     g_virtual_car.crank_angle_residual = 0;
@@ -251,67 +283,87 @@ void vc_advance(double advance_period_requested) {
     // up over several calls until there is enough for one cycle.
     for (;;) {
         // There are four crank angles that require us to end a block of CPU execution:
-        // * -80 degrees: Reset the CPU
-        // * -33 degrees: DME sets ignition line high (start of its idea of coil dwell period)
-        // * -30 degrees: DME sets ignition line low (end of its idea of coil dwell period)
-        // * +90 degrees: End of cycle for this cylinder. Move to next cylinder.
+        // * RESET_ANGLE:       Reset the CPU
+        // * dwell_start_angle: Start of the DME's dwell period (T1 goes high)
+        // * SPARK_ANGLE:       End of the DME's dwell period (T1 goes low)
+        // * +90 degrees:       End of cycle for this cylinder. Move to next cylinder.
+        //
+        // The dwell start moves around with RPM, because the dwell is a fixed
+        // time. At low RPM it comes between the reset and the
+        // spark. As RPM rises it moves earlier, to before the reset, and then
+        // further back still into the previous cylinder's cycle, where it
+        // shows up here as an angle after that cylinder's spark. So we can't
+        // assume the events come in any fixed order. Instead, find whichever
+        // one we will reach first.
         //
         // Inputs from DME that we model slightly wrongly:
-        // 1. The start of the dwell period should vary depending on RPM and load.
-        // 2. The dwell period should be ~3ms, not a constant amount of crank rotation.
+        // 1. The spark angle should vary depending on RPM and load.
 
-        if (car->crank_angle < -80.0 && target_crank_angle > -80.0) {
-            // Need to generate a reset
-            double degrees_until_reset = -80.0 - car->crank_angle;
-            int cycles_until_reset = ceil(degrees_until_reset / engine_speed_degrees_per_cycle);
-            // Note: used ceil() here to guarantee that crank_angle will be incremented to
-            // more than -80.0. If it was just truncated, we'd increment it to some tiny amount
-            // less than -80, meaning that next time around the for loop we'd come here again
-            // and wrongly do another reset.
-            cpu_execute(cycles_until_reset);
-            car->crank_angle += cycles_until_reset * engine_speed_degrees_per_cycle;
-            signal_reset();
+        enum { EVENT_NONE, EVENT_RESET, EVENT_DWELL_START, EVENT_DWELL_END, EVENT_NEXT_CYLINDER };
+        int event = EVENT_NONE;
+        double event_angle = target_crank_angle;
+        if (target_crank_angle > 90.0) {
+            event = EVENT_NEXT_CYLINDER;
+            event_angle = 90.0;
         }
-        else if (car->crank_angle < -33.0 && target_crank_angle > -33.0) {
-            // Need to signal start of dwell period
-            double degrees_until_dwell_start = -33.0 - car->crank_angle;
-            int cycles_until_dwell_start = ceil(degrees_until_dwell_start / engine_speed_degrees_per_cycle);
-            cpu_execute(cycles_until_dwell_start);
-            car->crank_angle += cycles_until_dwell_start * engine_speed_degrees_per_cycle;
-            signal_dwell_start();
+        if (car->crank_angle < RESET_ANGLE && event_angle > RESET_ANGLE) {
+            event = EVENT_RESET;
+            event_angle = RESET_ANGLE;
         }
-        else if (car->crank_angle < -30.0 && target_crank_angle > -30.0) {
-            // Need to signal end of dwell period
-            double degrees_until_dwell_end = -30.0 - car->crank_angle;
-            int cycles_until_dwell_end = ceil(degrees_until_dwell_end / engine_speed_degrees_per_cycle);
-            cpu_execute(cycles_until_dwell_end);
-            car->crank_angle += cycles_until_dwell_end * engine_speed_degrees_per_cycle;
-            signal_dwell_end();
+        if (car->crank_angle < car->dwell_start_angle && event_angle > car->dwell_start_angle) {
+            event = EVENT_DWELL_START;
+            event_angle = car->dwell_start_angle;
         }
-        else if (target_crank_angle > 90.0) {
-            // Need to wrap crank angle back to -90
-            double degrees_until_90 = 90.0 - car->crank_angle;
-            int cycles_until_90 = ceil(degrees_until_90 / engine_speed_degrees_per_cycle);
-            cpu_execute(cycles_until_90);
-            car->crank_angle += cycles_until_90 * engine_speed_degrees_per_cycle;
-            car->crank_angle -= 180.0;
-            target_crank_angle -= 180.0;
+        if (car->crank_angle < SPARK_ANGLE && event_angle > SPARK_ANGLE) {
+            event = EVENT_DWELL_END;
+            event_angle = SPARK_ANGLE;
         }
-        else {
+
+        if (event == EVENT_NONE) {
             // No events needed - do all the requested cycles.
             double degrees_until_end = target_crank_angle - car->crank_angle;
             // Not using ceil() here because rounding up could be bad. For example, imagine
-            // target_crank_angle was -33.01 degrees and engine_speed_degrees_per_cycle was 
-            // 0.02, then we might end up setting crank_angle to -32.99 and thus would skip
-            // the "signal start of dwell period" code on the next iteration of the for loop.
+            // target_crank_angle was just short of an event angle. Rounding up could carry
+            // crank_angle past that angle, and then we would skip the event on the next call.
             int cycles_until_end = degrees_until_end / engine_speed_degrees_per_cycle;
             // cycles_until_end can be zero, or negative if the ceil() at an
-            // event above carried the crank slightly past the target. Either
+            // event below carried the crank slightly past the target. Either
             // way there is nothing more to do in this call.
             if (cycles_until_end > 0) {
                 cpu_execute(cycles_until_end);
                 car->crank_angle += cycles_until_end * engine_speed_degrees_per_cycle;
             }
+            break;
+        }
+
+        // Run the CPU up to the event.
+        // Note: used ceil() here to guarantee that crank_angle will be incremented to
+        // more than the event angle. If it was just truncated, we'd increment it to some
+        // tiny amount less, meaning that next time around the for loop we'd come here
+        // again and wrongly generate the same event twice.
+        double degrees_until_event = event_angle - car->crank_angle;
+        int cycles_until_event = ceil(degrees_until_event / engine_speed_degrees_per_cycle);
+        cpu_execute(cycles_until_event);
+        car->crank_angle += cycles_until_event * engine_speed_degrees_per_cycle;
+
+        switch (event) {
+        case EVENT_RESET:
+            signal_reset();
+            break;
+        case EVENT_DWELL_START:
+            signal_dwell_start();
+            break;
+        case EVENT_DWELL_END:
+            signal_dwell_end();
+            // Now that this spark is done, decide where the dwell for the next
+            // one starts. Doing it here, once per cylinder, means the angle
+            // can't move while we are part way towards it.
+            car->dwell_start_angle = get_next_dwell_start_angle(car->engine_rpm);
+            break;
+        case EVENT_NEXT_CYLINDER:
+            // Wrap crank angle back to -90
+            car->crank_angle -= 180.0;
+            target_crank_angle -= 180.0;
             break;
         }
     }
