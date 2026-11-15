@@ -1,6 +1,6 @@
 src_dir=../..
 obj_dir=obj
-inc_dirs=-I ../.. -I ../../../../deadfrog-lib/src
+inc_dirs=-I ../.. -I ../../deadfrog
 
 COMPILE_AND_LINK_FLAGS=-lm #-flto #-fsanitize=address
 
@@ -16,18 +16,15 @@ cflags=-MMD -O0 -g -march=native \
 cxxflags=$(cflags) -Wno-reorder -Wno-class-memaccess -fno-threadsafe-statics -fno-rtti -fno-exceptions
 
 cpp_files=\
-	../../../../deadfrog-lib/src/df_bitmap.cpp \
-	../../../../deadfrog-lib/src/df_bmp.cpp \
-	../../../../deadfrog-lib/src/df_clipboard.cpp \
-	../../../../deadfrog-lib/src/df_colour.cpp \
-	../../../../deadfrog-lib/src/df_common_linux.cpp \
-	../../../../deadfrog-lib/src/df_font.cpp \
-	../../../../deadfrog-lib/src/df_message_dialog.cpp \
-	../../../../deadfrog-lib/src/df_polygon_aa.cpp \
-	../../../../deadfrog-lib/src/df_time.cpp \
-	../../../../deadfrog-lib/src/df_window.cpp	\
-	../../../../deadfrog-lib/src/fonts/df_mono.cpp \
-	../../../../deadfrog-lib/src/fonts/df_prop.cpp
+	../../deadfrog/df_bitmap.cpp \
+	../../deadfrog/df_colour.cpp \
+	../../deadfrog/df_common_linux.cpp \
+	../../deadfrog/df_font.cpp \
+	../../deadfrog/df_message_dialog.cpp \
+	../../deadfrog/df_time.cpp \
+	../../deadfrog/df_window.cpp	\
+	../../deadfrog/fonts/df_mono.cpp \
+	../../deadfrog/fonts/df_prop.cpp
 
 
 c_files=\
@@ -54,4 +51,4 @@ $(obj_dir)/%.o: $(src_dir)/%.c Makefile
 	LC_ALL=en_US gcc $(cflags) $(inc_dirs) $< -c -o $@
 
 clean:
-	rm -rf obj deadfrog-lib ../../CodeTrowel
+	rm -rf obj deadfrog ../../sim
