@@ -134,6 +134,17 @@ u8 cpu_external_mem_read(cpu_t *cpu, u8 addr) {
     return 0;
 }
 
+// On the KLR's circuit board, the T1 and INT pins of the microcontroller are
+// connected together. Both are fed by the DME's ignition signal, via an
+// inverter (see "Ignition input circuit" in the README). INT is active low, so
+// the external interrupt is requested for as long as T1 is low, and stops
+// being requested when T1 goes high.
+static void set_t1_and_int(bool t1_level) {
+    cpu_t *cpu = cpu_get();
+    g_t1 = t1_level;
+    cpu->irq_state = !t1_level; // Dodgy. There should be an interface function in the cpu module that we can call to do this.
+}
+
 void vc_init() {
     g_virtual_car.throttle_pos = 0;
 
@@ -146,6 +157,9 @@ void vc_init() {
 
     g_virtual_car.advance_period_residual = 0;
     g_virtual_car.crank_angle_residual = 0;
+
+    // The engine starts outside the dwell period, so T1 is low.
+    set_t1_and_int(0);
 }
 
 #define DRAW_TEXT(x, y, msg, ...) \
@@ -185,15 +199,14 @@ void signal_reset() {
 
 void signal_dwell_start() {
     cpu_t *cpu = cpu_get();
-    g_t1 = 1;
+    set_t1_and_int(1);
     graph_add_point(TO_KLR_IGNTION, cpu->master_clk, 0);
     graph_add_point(TO_KLR_IGNTION, cpu->master_clk, 255);
 }
 
 void signal_dwell_end() {
     cpu_t *cpu = cpu_get();
-    g_t1 = 0;
-    cpu->irq_state = 1; // Dodgy. There should be an interface function in the cpu module that we can call to do this.
+    set_t1_and_int(0);
     graph_add_point(TO_KLR_IGNTION, cpu->master_clk, 255);
     graph_add_point(TO_KLR_IGNTION, cpu->master_clk, 0);
 }
