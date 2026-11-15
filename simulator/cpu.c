@@ -648,6 +648,17 @@ void cpu_execute(int num_cycles) {
 
         m.prev_pc = m.pc;
 
+#ifdef DEBUG_HELP
+        fprintf(trace, "%03x %02x %02x\n", m.pc, m.prescaler, m.timer_counter);
+        fflush(trace);
+        if (m.pc == 0x812) // Edit this magic number and
+            m.pc = m.pc;   // breakpoint this line to implement
+						   // a breakpoint on the simulated CPU.
+
+        memcpy(m.pc_history, m.pc_history + 1, sizeof(m.pc_history) - 2);
+        m.pc_history[PC_HISTORY_LEN - 1] = m.pc;
+#endif
+
         // fetch and process opcode
         unsigned opcode = opcode_fetch();
         (*s_mcs48_opcodes[opcode])();

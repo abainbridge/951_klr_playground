@@ -14,6 +14,7 @@
 enum { CPU_CLOCK_RATE_HZ = 733333 };
 #define CPU_CLOCK_PERIOD (1.0 / CPU_CLOCK_RATE_HZ)
 
+//#define DEBUG_HELP
 
 typedef struct {
     u16 prev_pc;
@@ -44,6 +45,11 @@ typedef struct {
 
     u8 rom[4096];
     u8 ram[128];
+
+#ifdef DEBUG_HELP
+#define PC_HISTORY_LEN 16
+    u16 pc_history[PC_HISTORY_LEN];
+#endif
 } cpu_t;
 
 
