@@ -58,13 +58,17 @@ void graph_draw(graph_id_t id, unsigned time_now, unsigned time_range_to_display
     double scale_y = -(double)(h - 1) / 255.0;
     y += h - 1;
 
-    double x2;
-    double y2;
     int last_idx = (g->next_idx - 1 + MAX_POINTS) % MAX_POINTS;
     if (g->points[last_idx].time < start_time) {
         HLine(g_window->bmp, x, y + g->points[last_idx].val * scale_y, w, g_colourBlack);
         return;
     }
+
+    // Start with the newest point, so that if there is only one point (and
+    // so no lines for the loop below to draw) the final HLine still has a
+    // valid place to start from.
+    double x2 = x + (g->points[last_idx].time - start_time) * scale_x;
+    double y2 = y + g->points[last_idx].val * scale_y;
 
     for (int i = g->first_idx; i != last_idx; i = (i + 1) % MAX_POINTS) {
         graph_point_t *p1 = &g->points[i];
