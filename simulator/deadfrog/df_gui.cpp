@@ -1144,7 +1144,6 @@ struct MenuBar {
         m_highlightedMenu = NULL;
         m_displayed = false;
         m_capturingInput = false;
-        DebugOut("ClearAllState\n");
         m_contextMenu = NULL;
     }
 
@@ -1159,7 +1158,6 @@ struct MenuBar {
         m_contextMenu = contextMenu;
         m_contextMenu->m_highlightedItem = 0;
         m_capturingInput = true;
-        DebugOut("ShowContextMenu\n");
     }
 
     DfGuiAction CheckKeyboardShortcuts(DfWindow *win) {
@@ -1190,8 +1188,8 @@ struct MenuBar {
         // The events and states of the menu system are described in
         // deadfrog-lib/docs/MenuStateMachine.png
 
-//         if (!win->input.windowHasFocus || win->input.keyDowns[KEY_ESC])
-//              ClearAllState();
+        if (!win->input.windowHasFocus || win->input.keyDowns[KEY_ESC])
+             ClearAllState();
 
         DfGuiAction event = { 0 };
 
@@ -1290,10 +1288,9 @@ struct MenuBar {
         }
 
         if (m_contextMenu) {
-            m_contextMenu->CalculateScreenPostions(100, 100);
             if (win->input.lmbClicked || win->input.rmbClicked) {
                 if (!m_contextMenu->IsMouseOver(win)) {
-                    //ClearAllState();
+                    ClearAllState();
                 }
             }
             else if (!event.menuItemLabel) {
@@ -1379,6 +1376,19 @@ void DfMenuBarAddAction(DfMenuBar *dfMb, char const *menuName,
 }
 
 
+void DfMenuBarRemoveAction(DfMenuBar *dfMb, char const *menuName,
+    char const *menuItemLabel, DfKeyboardShortcut shortcut) {
+    MenuBar *mb = (MenuBar*)dfMb->internals;
+    mb->ClearAllState();
+    Menu *menu = mb->FindMenuByName(menuName);
+    if (!menu)
+        menu = mb->AddMenu(menuName);
+
+    if (menu)
+        menu->AddItem({ menuName, menuItemLabel, 0, shortcut });
+}
+
+
 DfGuiAction DfMenuBarDo(DfWindow *win, DfMenuBar *dfMb) {
     MenuBar *mb = (MenuBar*)dfMb->internals;
     DfGuiAction event = mb->Advance(win);
@@ -1386,22 +1396,4 @@ DfGuiAction DfMenuBarDo(DfWindow *win, DfMenuBar *dfMb) {
     dfMb->capturingInput = mb->m_capturingInput;
     dfMb->height = mb->m_height;
     return event;
-}
-
-
-void DfMenuBarShowContextMenu(DfMenuBar *dfMb, DfContextMenu *dfCm, int x, int y) {
-    MenuBar *mb = (MenuBar*)dfMb->internals;
-    Menu *cm = (Menu *)dfCm->internals;
-    mb->ShowContextMenu(cm);
-}
-
-
-DfContextMenu DfContextMenuCreate() {
-    return { new Menu("Context") };
-}
-
-
-void DfContextMenuAddAction(DfContextMenu *cm, char const *menuItemLabel, int hotkeyIndex) {
-    Menu *menu = (Menu *)cm->internals;
-    menu->AddItem({ "Context", menuItemLabel, hotkeyIndex, {} });
 }

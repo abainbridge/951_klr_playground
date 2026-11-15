@@ -26,7 +26,7 @@ extern "C"
 #define KEY_MAX 256
 
 typedef void (RedrawCallback)(void);
-typedef void (FileDropCallback)(char const *path);
+typedef void (FileDropCallback)(char const *path); // path will be freed by deadfrog lib as soon this callback returns.
 typedef struct _DfWindowPrivate DfWindowPrivate;
 
 
@@ -83,7 +83,7 @@ typedef struct _DfWindow {
     double              advanceTime; // Time between last two calls of UpdateWin(win).
     RedrawCallback      *redrawCallback;
 
-    // A callback that will be called when files are drag-and-dropped onto the window.
+    // This callback will be called when files are drag-and-dropped onto the window.
     FileDropCallback    *fileDropCallback;
 
     DfWindowPrivate     *_private; // Internal stuff not accessible from the API.
@@ -108,6 +108,7 @@ typedef enum {
 } MouseCursorType;
 
 
+// TODO: Rename to GetPrimaryMonitorRes()
 DLL_API bool GetDesktopRes(int *width, int *height);
 
 // Creates a Window (fullscreen is really just a big window) and a bitmap the size of the window
@@ -142,9 +143,14 @@ DLL_API void HideMouse(DfWindow *win);
 
 DLL_API void SetMouseCursor(DfWindow *win, MouseCursorType t);
 
-// Currently Windows only. Assumes that you have a 16x16 and optionally a 32x32 icon
+// On Windows, this function assumes that you have a 16x16 and optionally a 32x32 icon
 // resource in your executable and that the id is 101.
+#ifdef _MSC_VER
 DLL_API void SetWindowIcon(DfWindow *win);
+#else
+DLL_API void SetWindowIcon(DfWindow *win, int w, int h, DfColour *pixels);
+#endif
+
 
 DLL_API bool IsWindowMaximized(DfWindow *win);
 DLL_API void SetMaximizedState(DfWindow *win, bool maximize);

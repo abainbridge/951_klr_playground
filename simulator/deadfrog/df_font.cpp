@@ -3,13 +3,6 @@
 #include "df_bitmap.h"
 #include "df_common.h"
 
-#if _MSC_VER
-// #define WIN32_LEAN_AND_MEAN
-// #include <windows.h>
-#else
-#include "df_bmp.h"
-#endif
-
 #include <limits.h>
 #include <memory.h>
 #include <stdarg.h>
